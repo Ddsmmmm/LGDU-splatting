@@ -170,29 +170,15 @@ def _luma(image):
     return image.mean(dim=0)
 
 
-def _estimate_alpha_from_backgrounds(
+def _estimate_alpha_from_white_background(
     viewpoint_cam,
     gaussians,
     pipe,
-    current_image,
-    current_bg,
+    black_reference,
     use_trained_exp,
     separate_sh,
 ):
-    black_bg = torch.zeros((3,), dtype=current_bg.dtype, device=current_bg.device)
-    white_bg = torch.ones((3,), dtype=current_bg.dtype, device=current_bg.device)
-
-    if torch.allclose(current_bg.detach(), black_bg) and viewpoint_cam.alpha_mask is None:
-        render_black = current_image
-    else:
-        render_black = render(
-            viewpoint_cam,
-            gaussians,
-            pipe,
-            black_bg,
-            use_trained_exp=use_trained_exp,
-            separate_sh=separate_sh,
-        )["render"]
+    white_bg = torch.ones((3,), dtype=black_reference.dtype, device=black_reference.device)
 
     render_white = render(
         viewpoint_cam,
@@ -205,10 +191,10 @@ def _estimate_alpha_from_backgrounds(
 
     if viewpoint_cam.alpha_mask is not None:
         alpha_mask = viewpoint_cam.alpha_mask.cuda()
-        render_black = render_black * alpha_mask
+        black_reference = black_reference * alpha_mask
         render_white = render_white * alpha_mask
 
-    bg_gap = (render_white - render_black).mean(dim=0)
+    bg_gap = (render_white - black_reference.detach()).mean(dim=0)
     alpha_estimate = 1.0 - bg_gap
     return alpha_estimate.clamp(0.0, 1.0)
 
@@ -639,42 +625,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             else:
                 line_image_edge_loss_value = 0.0
 
-        if coverage_loss_window:
-            alpha_estimate = _estimate_alpha_from_backgrounds(
-                viewpoint_cam,
-                gaussians,
-                pipe,
-                image,
-                bg,
-                dataset.train_test_exp,
-                SPARSE_ADAM_AVAILABLE,
-            )
-            camera_alpha_mask = viewpoint_cam.alpha_mask.cuda() if viewpoint_cam.alpha_mask is not None else None
-            coverage_loss_value, coverage_alpha_mean, coverage_mask_mean = _coverage_alpha_loss(
-                alpha_estimate,
-                image,
-                gt_image,
-                opt,
-                line_mask=line_mask,
-                camera_alpha_mask=camera_alpha_mask,
-            )
-            if coverage_loss_value is not None and opt.coverage_lambda_adaptive:
-                coverage_weight = (
-                    opt.coverage_lambda_target_ratio
-                    * photometric_loss.detach()
-                    / coverage_loss_value.detach().clamp_min(1e-12)
-                )
-                if opt.coverage_lambda_adaptive_max > 0.0:
-                    coverage_weight = coverage_weight.clamp(max=opt.coverage_lambda_adaptive_max)
-                coverage_weight = coverage_weight.clamp(min=opt.coverage_lambda_adaptive_min)
-            else:
-                coverage_weight = coverage_weight_func(iteration)
-            if coverage_loss_value is not None:
-                coverage_weight_value = coverage_weight.item() if torch.is_tensor(coverage_weight) else float(coverage_weight)
-                loss = loss + coverage_weight * coverage_loss_value
-            else:
-                coverage_loss_value = 0.0
-
         sampled_xyz = None
         sampled_point_indices = None
         sampled_distances = None
@@ -794,13 +744,67 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             Ll1depth = 0
 
+        loss_for_log_value = loss.item()
         loss.backward()
+
+        if coverage_loss_window:
+            black_bg = torch.zeros((3,), dtype=bg.dtype, device=bg.device)
+            if torch.allclose(bg.detach(), black_bg) and viewpoint_cam.alpha_mask is None:
+                black_reference = image.detach()
+            else:
+                with torch.no_grad():
+                    black_reference = render(
+                        viewpoint_cam,
+                        gaussians,
+                        pipe,
+                        black_bg,
+                        use_trained_exp=dataset.train_test_exp,
+                        separate_sh=SPARSE_ADAM_AVAILABLE,
+                    )["render"]
+                    if viewpoint_cam.alpha_mask is not None:
+                        black_reference = black_reference * viewpoint_cam.alpha_mask.cuda()
+
+            alpha_estimate = _estimate_alpha_from_white_background(
+                viewpoint_cam,
+                gaussians,
+                pipe,
+                black_reference,
+                dataset.train_test_exp,
+                SPARSE_ADAM_AVAILABLE,
+            )
+            camera_alpha_mask = viewpoint_cam.alpha_mask.cuda() if viewpoint_cam.alpha_mask is not None else None
+            coverage_loss_value, coverage_alpha_mean, coverage_mask_mean = _coverage_alpha_loss(
+                alpha_estimate,
+                image.detach(),
+                gt_image,
+                opt,
+                line_mask=line_mask,
+                camera_alpha_mask=camera_alpha_mask,
+            )
+            if coverage_loss_value is not None and opt.coverage_lambda_adaptive:
+                coverage_weight = (
+                    opt.coverage_lambda_target_ratio
+                    * photometric_loss.detach()
+                    / coverage_loss_value.detach().clamp_min(1e-12)
+                )
+                if opt.coverage_lambda_adaptive_max > 0.0:
+                    coverage_weight = coverage_weight.clamp(max=opt.coverage_lambda_adaptive_max)
+                coverage_weight = coverage_weight.clamp(min=opt.coverage_lambda_adaptive_min)
+            else:
+                coverage_weight = coverage_weight_func(iteration)
+            if coverage_loss_value is not None:
+                coverage_weight_value = coverage_weight.item() if torch.is_tensor(coverage_weight) else float(coverage_weight)
+                weighted_coverage_loss = coverage_weight * coverage_loss_value
+                weighted_coverage_loss.backward()
+                loss_for_log_value += weighted_coverage_loss.item()
+            else:
+                coverage_loss_value = 0.0
 
         iter_end.record()
 
         with torch.no_grad():
             # Progress bar
-            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            ema_loss_for_log = 0.4 * loss_for_log_value + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
             if torch.is_tensor(line_loss_value):
                 line_loss_for_log = line_loss_value.item()
