@@ -164,6 +164,98 @@ def _projected_line_photometric_loss(render_image, gt_image, line_mask, eps):
     return (line_mask * per_pixel).sum() / mask_sum.clamp_min(1e-8)
 
 
+def _luma(image):
+    if image.shape[0] >= 3:
+        return 0.299 * image[0] + 0.587 * image[1] + 0.114 * image[2]
+    return image.mean(dim=0)
+
+
+def _estimate_alpha_from_backgrounds(
+    viewpoint_cam,
+    gaussians,
+    pipe,
+    current_image,
+    current_bg,
+    use_trained_exp,
+    separate_sh,
+):
+    black_bg = torch.zeros((3,), dtype=current_bg.dtype, device=current_bg.device)
+    white_bg = torch.ones((3,), dtype=current_bg.dtype, device=current_bg.device)
+
+    if torch.allclose(current_bg.detach(), black_bg) and viewpoint_cam.alpha_mask is None:
+        render_black = current_image
+    else:
+        render_black = render(
+            viewpoint_cam,
+            gaussians,
+            pipe,
+            black_bg,
+            use_trained_exp=use_trained_exp,
+            separate_sh=separate_sh,
+        )["render"]
+
+    render_white = render(
+        viewpoint_cam,
+        gaussians,
+        pipe,
+        white_bg,
+        use_trained_exp=use_trained_exp,
+        separate_sh=separate_sh,
+    )["render"]
+
+    if viewpoint_cam.alpha_mask is not None:
+        alpha_mask = viewpoint_cam.alpha_mask.cuda()
+        render_black = render_black * alpha_mask
+        render_white = render_white * alpha_mask
+
+    bg_gap = (render_white - render_black).mean(dim=0)
+    alpha_estimate = 1.0 - bg_gap
+    return alpha_estimate.clamp(0.0, 1.0)
+
+
+def _coverage_alpha_loss(
+    alpha_estimate,
+    render_image,
+    gt_image,
+    opt,
+    line_mask=None,
+    camera_alpha_mask=None,
+):
+    mode = str(opt.coverage_mask_mode).lower()
+    mask = torch.ones_like(alpha_estimate)
+    gt_luma = _luma(gt_image).detach()
+
+    if "dark" in mode:
+        mask = mask * (gt_luma <= float(opt.coverage_dark_threshold)).float()
+    if "error" in mode:
+        photo_error = (render_image.detach() - gt_image.detach()).abs().mean(dim=0)
+        mask = mask * (photo_error >= float(opt.coverage_error_threshold)).float()
+    if (opt.coverage_use_line_mask or "line" in mode) and line_mask is not None:
+        line_component = line_mask.detach()
+        dilation_px = max(int(opt.coverage_line_mask_dilation_px), 0)
+        if dilation_px > 0:
+            kernel_size = 2 * dilation_px + 1
+            line_component = F.max_pool2d(
+                line_component[None, None],
+                kernel_size=kernel_size,
+                stride=1,
+                padding=dilation_px,
+            )[0, 0]
+        mask = mask * line_component.clamp(0.0, 1.0)
+    if camera_alpha_mask is not None:
+        mask = mask * camera_alpha_mask.squeeze().detach().float()
+
+    mask_sum = mask.sum()
+    if mask_sum <= 1e-8:
+        return None, 0.0, 0.0
+
+    target = float(opt.coverage_alpha_target)
+    deficit = torch.relu(target - alpha_estimate)
+    loss = (mask * deficit * deficit).sum() / mask_sum.clamp_min(1e-8)
+    alpha_mean = (mask * alpha_estimate).sum() / mask_sum.clamp_min(1e-8)
+    return loss, alpha_mean.item(), mask.mean().item()
+
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
@@ -193,12 +285,29 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     line_photo_weight_func = None
     line_image_edge_weight_func = None
     line_orient_weight_func = None
+    coverage_weight_func = None
     line_loss_active = False
     line_photo_active = False
     line_image_edge_active = False
     line_edge_support_active = False
     line_orient_active = False
     line_densify_active = False
+    coverage_loss_active = (
+        opt.coverage_loss_enable
+        and (
+            opt.coverage_lambda_init > 0.0
+            or opt.coverage_lambda_final > 0.0
+            or opt.coverage_lambda_adaptive
+        )
+    )
+    if opt.coverage_lambda_max_steps > 0:
+        coverage_weight_func = get_expon_lr_func(
+            opt.coverage_lambda_init,
+            opt.coverage_lambda_final,
+            max_steps=opt.coverage_lambda_max_steps,
+        )
+    else:
+        coverage_weight_func = lambda _it: opt.coverage_lambda_init
     if opt.line_segments_path or opt.line_tracks_path:
         line_segments, line_confidences = load_line_segments_with_confidence(
             obj_path=opt.line_segments_path,
@@ -320,6 +429,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_line_image_edge_weight_for_log = 0.0
     ema_orient_loss_for_log = 0.0
     ema_orient_weight_for_log = 0.0
+    ema_coverage_loss_for_log = 0.0
+    ema_coverage_weight_for_log = 0.0
+    ema_coverage_alpha_for_log = 0.0
+    ema_coverage_mask_for_log = 0.0
     ema_edge_support_for_log = 0.0
     ema_line_mask_mean_for_log = 0.0
 
@@ -389,6 +502,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         line_image_edge_weight_value = 0.0
         orient_loss_value = 0.0
         orient_weight_value = 0.0
+        coverage_loss_value = 0.0
+        coverage_weight_value = 0.0
+        coverage_alpha_mean = 0.0
+        coverage_mask_mean = 0.0
         edge_support_mean = 0.0
         line_mask_mean = 0.0
 
@@ -412,9 +529,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             and iteration >= opt.line_orient_start_iter
             and (opt.line_orient_end_iter <= 0 or iteration <= opt.line_orient_end_iter)
         )
+        coverage_loss_window = (
+            coverage_loss_active
+            and iteration >= opt.coverage_loss_start_iter
+            and (opt.coverage_loss_end_iter <= 0 or iteration <= opt.coverage_loss_end_iter)
+            and iteration % max(int(opt.coverage_loss_interval), 1) == 0
+        )
+        coverage_needs_line_mask = coverage_loss_window and (
+            opt.coverage_use_line_mask or "line" in str(opt.coverage_mask_mode).lower()
+        )
 
         line_view_confidences = line_confidences
-        if line_segments is not None and line_edge_support_active and (center_loss_window or photo_loss_window or image_edge_loss_window or orient_loss_window):
+        if line_segments is not None and line_edge_support_active and (center_loss_window or photo_loss_window or image_edge_loss_window or orient_loss_window or coverage_needs_line_mask):
             edge_support = projected_line_edge_support(
                 line_segments,
                 viewpoint_cam,
@@ -430,10 +556,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             edge_support_mean = edge_support.mean().item()
 
         line_mask = None
-        if line_segments is not None and (photo_loss_window or image_edge_loss_window):
+        if line_segments is not None and (photo_loss_window or image_edge_loss_window or coverage_needs_line_mask):
             if photo_loss_window:
                 mask_sample_count = opt.line_photo_sample_count
                 mask_dilation_px = opt.line_photo_mask_dilation_px
+                mask_min_valid_ratio = opt.line_photo_min_valid_ratio
+                mask_min_projected_length = opt.line_photo_min_projected_length
+                mask_chunk_size = opt.line_photo_chunk_size
+                mask_min_weight = opt.line_photo_min_weight
+            elif coverage_needs_line_mask:
+                mask_sample_count = opt.line_photo_sample_count
+                mask_dilation_px = opt.coverage_line_mask_dilation_px
                 mask_min_valid_ratio = opt.line_photo_min_valid_ratio
                 mask_min_projected_length = opt.line_photo_min_projected_length
                 mask_chunk_size = opt.line_photo_chunk_size
@@ -505,6 +638,42 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 loss = loss + image_edge_weight * line_image_edge_loss_value
             else:
                 line_image_edge_loss_value = 0.0
+
+        if coverage_loss_window:
+            alpha_estimate = _estimate_alpha_from_backgrounds(
+                viewpoint_cam,
+                gaussians,
+                pipe,
+                image,
+                bg,
+                dataset.train_test_exp,
+                SPARSE_ADAM_AVAILABLE,
+            )
+            camera_alpha_mask = viewpoint_cam.alpha_mask.cuda() if viewpoint_cam.alpha_mask is not None else None
+            coverage_loss_value, coverage_alpha_mean, coverage_mask_mean = _coverage_alpha_loss(
+                alpha_estimate,
+                image,
+                gt_image,
+                opt,
+                line_mask=line_mask,
+                camera_alpha_mask=camera_alpha_mask,
+            )
+            if coverage_loss_value is not None and opt.coverage_lambda_adaptive:
+                coverage_weight = (
+                    opt.coverage_lambda_target_ratio
+                    * photometric_loss.detach()
+                    / coverage_loss_value.detach().clamp_min(1e-12)
+                )
+                if opt.coverage_lambda_adaptive_max > 0.0:
+                    coverage_weight = coverage_weight.clamp(max=opt.coverage_lambda_adaptive_max)
+                coverage_weight = coverage_weight.clamp(min=opt.coverage_lambda_adaptive_min)
+            else:
+                coverage_weight = coverage_weight_func(iteration)
+            if coverage_loss_value is not None:
+                coverage_weight_value = coverage_weight.item() if torch.is_tensor(coverage_weight) else float(coverage_weight)
+                loss = loss + coverage_weight * coverage_loss_value
+            else:
+                coverage_loss_value = 0.0
 
         sampled_xyz = None
         sampled_point_indices = None
@@ -657,6 +826,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 orient_loss_for_log = float(orient_loss_value)
             ema_orient_loss_for_log = 0.4 * orient_loss_for_log + 0.6 * ema_orient_loss_for_log
             ema_orient_weight_for_log = 0.4 * orient_weight_value + 0.6 * ema_orient_weight_for_log
+            if torch.is_tensor(coverage_loss_value):
+                coverage_loss_for_log = coverage_loss_value.item()
+            else:
+                coverage_loss_for_log = float(coverage_loss_value)
+            ema_coverage_loss_for_log = 0.4 * coverage_loss_for_log + 0.6 * ema_coverage_loss_for_log
+            ema_coverage_weight_for_log = 0.4 * coverage_weight_value + 0.6 * ema_coverage_weight_for_log
+            ema_coverage_alpha_for_log = 0.4 * coverage_alpha_mean + 0.6 * ema_coverage_alpha_for_log
+            ema_coverage_mask_for_log = 0.4 * coverage_mask_mean + 0.6 * ema_coverage_mask_for_log
             ema_edge_support_for_log = 0.4 * edge_support_mean + 0.6 * ema_edge_support_for_log
             ema_line_mask_mean_for_log = 0.4 * line_mask_mean + 0.6 * ema_line_mask_mean_for_log
 
@@ -672,6 +849,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     "ImgEdge W": f"{ema_line_image_edge_weight_for_log:.{7}f}",
                     "Orient Loss": f"{ema_orient_loss_for_log:.{7}f}",
                     "Orient W": f"{ema_orient_weight_for_log:.{7}f}",
+                    "Cov Loss": f"{ema_coverage_loss_for_log:.{7}f}",
+                    "Cov W": f"{ema_coverage_weight_for_log:.{7}f}",
+                    "Cov Alpha": f"{ema_coverage_alpha_for_log:.{7}f}",
+                    "Cov Mask": f"{ema_coverage_mask_for_log:.{7}f}",
                     "Edge Sup": f"{ema_edge_support_for_log:.{7}f}",
                     "LineMask": f"{ema_line_mask_mean_for_log:.{7}f}",
                 })
@@ -680,7 +861,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.write(
                     "[ITER {}] Loss={:.7f} Depth={:.7f} LineLoss={:.7f} LineW={:.7f} "
                     "LinePhotoLoss={:.7f} LinePhotoW={:.7f} ImgEdgeLoss={:.7f} ImgEdgeW={:.7f} "
-                    "OrientLoss={:.7f} OrientW={:.7f} EdgeSup={:.7f} LineMask={:.7f}".format(
+                    "OrientLoss={:.7f} OrientW={:.7f} CovLoss={:.7f} CovW={:.7f} "
+                    "CovAlpha={:.7f} CovMask={:.7f} EdgeSup={:.7f} LineMask={:.7f}".format(
                         iteration,
                         ema_loss_for_log,
                         ema_Ll1depth_for_log,
@@ -692,6 +874,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         ema_line_image_edge_weight_for_log,
                         ema_orient_loss_for_log,
                         ema_orient_weight_for_log,
+                        ema_coverage_loss_for_log,
+                        ema_coverage_weight_for_log,
+                        ema_coverage_alpha_for_log,
+                        ema_coverage_mask_for_log,
                         ema_edge_support_for_log,
                         ema_line_mask_mean_for_log,
                     )
