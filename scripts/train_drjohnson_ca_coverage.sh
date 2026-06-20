@@ -19,7 +19,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python train.py \
   --test_iterations -1 \
   --checkpoint_iterations 15000 30000 \
   --progress_full_log_interval 100 \
-  --densify_max_points_per_stage 0 \
+  --densify_until_iter 7000 \
   --start_checkpoint "${START_CHECKPOINT}" \
   --line_tracks_path "${LINE_TRACKS_PATH}" \
   --line_min_visible_views 6 \
@@ -55,7 +55,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python train.py \
   --coverage_loss_start_iter 3000 \
   --coverage_loss_end_iter 20000 \
   --coverage_loss_interval 4 \
-  --coverage_render_downsample 2 \
+  --coverage_render_downsample 4 \
   --coverage_opacity_target 0.8 \
   --coverage_alpha_target 0.98 \
   --coverage_mask_mode dark \
