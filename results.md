@@ -1,90 +1,141 @@
-# Evaluations
-We evaluated the impact of the features we added on MipNeRF360, Tanks&Temples and Deep Blending datasets. [Exposure Compensation](#exposure-compensation) is evaluated separately. Note that [Default rasterizer](#default-rasterizer) refers to the original [3dgs rasterizer](https://github.com/graphdeco-inria/diff-gaussian-rasterization/tree/9c5c2028f6fbee2be239bc4c9421ff894fe4fbe0) and [Accelerated rasterizer](#accelerated-rasterizer) refers to the [taming-3dgs rasterizer](https://github.com/graphdeco-inria/diff-gaussian-rasterization/tree/3dgs_accel).
+# Experiment Results
 
-## Default rasterizer
+This file records the current local experiment results for EVP-LineSplat variants. Values are computed on rendered `test` views using:
 
-### PSNR
+```bash
+python metrics_stream.py --split test -m <model_paths...>
+```
 
-![all results PSNR](assets/charts/base_PSNR.png)
+Metric convention:
 
-***DR**:depth regularization, **AA**:antialiasing*
+- PSNR: higher is better.
+- SSIM: higher is better.
+- LPIPS: lower is better.
 
-<br>
+## DrJohnson
 
-![nodepth/depth](assets/depth_comparison.png)
+Dataset path used locally:
 
-### SSIM
-![all results SSIM](assets/charts/base_SSIM.png)
+```text
+/home/ddsm/DownLoad/Confidence-Aware-LineSplat/gaussian-splatting/data/drjohnson
+```
 
-***DR**:depth regularization, **AA**:antialiasing*
+LIMAP line tracks:
 
-### LPIPS
-![all results LPIPS](assets/charts/base_LPIPS.png)
+```text
+/home/ddsm/DownLoad/limap/outputs/drjohnson/drjohnson_nv6/alltracks.txt
+```
 
-*lower is better, **DR**:depth regularization, **AA**:antialiasing*
+Evaluation split:
 
-## Accelerated rasterizer
+```text
+--eval, resolution 2, test views: 33
+```
 
-### Default optimizer
+| Method | SSIM ↑ | PSNR ↑ | LPIPS ↓ | Notes |
+|---|---:|---:|---:|---|
+| 3DGS | 0.9128616 | 29.6547909 | 0.1390142 | Original 3DGS baseline |
+| No-line pure3DGS | 0.9128566 | 29.6300488 | 0.1383264 | This codebase with line guidance disabled |
+| Mini-Splatting | 0.9110953 | **29.7897034** | 0.1596022 | Best PSNR, weaker perceptual score |
+| Edge-center adaptive | **0.9130062** | 29.5559807 | 0.1388844 | Best SSIM, but PSNR drops |
+| EVP-LineSplat-v1 | 0.9122745 | 29.6463909 | 0.1388366 | Projected line gradient loss |
+| EVP-LineSplat-v2 | 0.9128430 | 29.6245480 | **0.1381441** | Current main variant; best LPIPS |
 
-These numbers were obtained using the accelerated rasterizer and `--optimizer_type default` when training.
+Current interpretation:
 
-#### PSNR
-![all results PSNR](assets/charts/accel_default_PSNR.png)
+- Mini-Splatting achieves the highest PSNR, but LPIPS is substantially worse.
+- Edge-center adaptive improves SSIM slightly, but harms PSNR.
+- EVP-LineSplat-v2 gives the best LPIPS, indicating better perceptual quality, but does not yet dominate PSNR/SSIM.
+- Whole-image metrics may under-represent improvements around projected line structures.
 
-***DR**:depth regularization, **AA**:antialiasing*
+## Playroom
 
-#### SSIM
-![all results SSIM](assets/charts/accel_default_SSIM.png)
+Dataset path used locally:
 
-***DR**:depth regularization, **AA**:antialiasing*
+```text
+/home/ddsm/DownLoad/Confidence-Aware-LineSplat/gaussian-splatting/data
+```
 
-#### LPIPS
-![all results LPIPS](assets/charts/accel_default_LPIPS.png)
+Evaluation split:
 
-*lower is better, **DR**:depth regularization, **AA**:antialiasing*
+```text
+--eval, resolution 2, test views: 29
+```
 
-### Sparse Adam optimizer
+| Method | SSIM ↑ | PSNR ↑ | LPIPS ↓ | Notes |
+|---|---:|---:|---:|---|
+| 3DGS | 0.9267502 | 30.4722576 | 0.1371734 | Original 3DGS baseline |
+| No-line pure3DGS | 0.9262590 | 30.4242325 | 0.1371497 | This codebase with line guidance disabled |
+| Mini-Splatting | **0.9281572** | **30.6869240** | 0.1495531 | Best PSNR/SSIM, weaker LPIPS |
+| Visibility adaptive | 0.9260339 | 30.4887085 | 0.1375082 | Earlier confidence-aware line variant |
+| Edge-orient | 0.9266110 | 30.3845959 | 0.1375450 | Orientation loss was not stable enough |
+| Edge-center adaptive | 0.9274006 | 30.4953423 | **0.1366614** | Best LPIPS among listed methods |
 
-These numbers were obtained using the accelerated rasterizer and `--optimizer_type sparse_adam` when training.
+Current interpretation:
 
-#### PSNR
-![all results PSNR](assets/charts/accel_sparse_adam_PSNR.png)
+- Mini-Splatting is strongest on PSNR/SSIM for this scene, but LPIPS is worse.
+- Edge-center adaptive improves LPIPS and slightly improves PSNR over 3DGS.
+- Orientation alignment is not recommended as a default main loss.
 
-***DR**:depth regularization, **AA**:antialiasing*
+## Method Notes
 
-#### SSIM
-![all results SSIM](assets/charts/accel_sparse_adam_SSIM.png)
+### Why LPIPS matters here
 
-***DR**:depth regularization, **AA**:antialiasing*
+Line-guided methods primarily target structural regions: edges, contours, and object boundaries. Whole-image PSNR can penalize small edge shifts and may prefer smoother images. LPIPS is usually more aligned with perceptual visual quality, especially when comparing local structure and sharpness.
 
-#### LPIPS
-![all results LPIPS](assets/charts/accel_sparse_adam_LPIPS.png)
+For paper reporting, use all three metrics, but include local crop comparisons around line-rich regions.
 
-*lower is better, **DR**:depth regularization, **AA**:antialiasing*
+### Known limitation: white holes on dark surfaces
 
-## Exposure compensation
+Viewer inspection showed that Mini-Splatting can produce cleaner dark surfaces than 3DGS/Ours. This is likely because Mini-Splatting explicitly repairs low-alpha / low-coverage pixels by sampling from:
 
-We account for exposure variations between images by optimizing a 3x4 affine transform for each image. During training, this transform is applied to the colour of the rendered images.
-The exposure compensation is designed to improve the inputs' coherence during training and is not applied during real-time navigation.
-Enabling the `--train_test_exp` option includes the left half of the test images in the training set, using only their right halves for testing, following the same testing methodology as NeRF-W and Mega-NeRF. This allows us to optimize the exposure affine transform for test views. However, since this setting alters the train/test splits, the resulting metrics are not comparable to those from models trained without it. Here we provide results with `--train_test_exp`, with and without exposure compensation.
+```text
+prob = 1 - accum_alpha
+```
 
-### PSNR
+and reinitializing Gaussians on under-covered regions.
 
-![exposures_psnr](/assets/charts/exposure_PSNR.png)
+Current EVP-LineSplat variants do not yet include an alpha coverage repair mechanism. This motivates the next step:
 
-### SSIM
+```text
+Coverage-aware EVP-LineSplat
+```
 
-![exposures_ssim](/assets/charts/exposure_SSIM.png)
+Expected components:
 
-### LPIPS
+- Surface alpha coverage regularization.
+- Optional low-alpha region repair.
+- Keep EVP-v2 photometric reweighting as the line-structure guidance.
 
-*Lower is better.*
-![exposures_lpips](/assets/charts/exposure_LPIPS.png)
+## Reproducibility Checklist
 
-![noexposure/exposure](assets/Exposure_comparison.png)
+For fair comparison, use:
 
-## Training times comparisons
+```text
+--eval
+--resolution 2
+--data_device cpu
+--test_iterations -1
+--checkpoint_iterations 7000 15000 30000
+--densify_max_points_per_stage 0
+```
 
-We report the training times with all features enabled using the original 3dgs rasterizer *(baseline)* and the accelerated rasterizer with default optimizer then sparse adam.
-![Training-times](assets/charts/timings.png)
+Render before metrics:
+
+```bash
+python render.py \
+  -s <scene_path> \
+  -m <model_path> \
+  --iteration 30000 \
+  --skip_train \
+  --resolution 2 \
+  --data_device cpu
+```
+
+Evaluate:
+
+```bash
+python metrics_stream.py \
+  --split test \
+  -m <model_path_1> <model_path_2> ...
+```
