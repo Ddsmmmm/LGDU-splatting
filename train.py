@@ -10,6 +10,7 @@
 #
 
 import os
+import math
 import torch
 import torch.nn.functional as F
 from random import randint
@@ -164,6 +165,64 @@ def _projected_line_photometric_loss(render_image, gt_image, line_mask, eps):
     return (line_mask * per_pixel).sum() / mask_sum.clamp_min(1e-8)
 
 
+class _CoverageCamera:
+    pass
+
+
+def _make_coverage_camera(viewpoint_cam, downsample):
+    downsample = max(int(downsample), 1)
+    if downsample <= 1:
+        return viewpoint_cam
+
+    coverage_cam = _CoverageCamera()
+    coverage_cam.uid = getattr(viewpoint_cam, "uid", None)
+    coverage_cam.colmap_id = getattr(viewpoint_cam, "colmap_id", None)
+    coverage_cam.R = viewpoint_cam.R
+    coverage_cam.T = viewpoint_cam.T
+    coverage_cam.FoVx = viewpoint_cam.FoVx
+    coverage_cam.FoVy = viewpoint_cam.FoVy
+    coverage_cam.image_name = viewpoint_cam.image_name
+    coverage_cam.znear = viewpoint_cam.znear
+    coverage_cam.zfar = viewpoint_cam.zfar
+    coverage_cam.world_view_transform = viewpoint_cam.world_view_transform
+    coverage_cam.projection_matrix = viewpoint_cam.projection_matrix
+    coverage_cam.full_proj_transform = viewpoint_cam.full_proj_transform
+    coverage_cam.camera_center = viewpoint_cam.camera_center
+    coverage_cam.image_height = max(1, int(round(float(viewpoint_cam.image_height) / float(downsample))))
+    coverage_cam.image_width = max(1, int(round(float(viewpoint_cam.image_width) / float(downsample))))
+
+    if viewpoint_cam.alpha_mask is not None:
+        coverage_cam.alpha_mask = _resize_chw(
+            viewpoint_cam.alpha_mask.float(),
+            coverage_cam.image_height,
+            coverage_cam.image_width,
+        ).clamp(0.0, 1.0)
+    else:
+        coverage_cam.alpha_mask = None
+
+    return coverage_cam
+
+
+def _resize_chw(image, height, width, mode="bilinear"):
+    height = int(height)
+    width = int(width)
+    if image.shape[-2] == height and image.shape[-1] == width:
+        return image
+    if mode == "nearest":
+        return F.interpolate(image[None], size=(height, width), mode=mode)[0]
+    return F.interpolate(image[None], size=(height, width), mode=mode, align_corners=False)[0]
+
+
+def _resize_hw(mask, height, width, mode="bilinear"):
+    height = int(height)
+    width = int(width)
+    if mask.shape[-2] == height and mask.shape[-1] == width:
+        return mask
+    if mode == "nearest":
+        return F.interpolate(mask[None, None], size=(height, width), mode=mode)[0, 0]
+    return F.interpolate(mask[None, None], size=(height, width), mode=mode, align_corners=False)[0, 0]
+
+
 def _luma(image):
     if image.shape[0] >= 3:
         return 0.299 * image[0] + 0.587 * image[1] + 0.114 * image[2]
@@ -199,14 +258,7 @@ def _estimate_alpha_from_white_background(
     return alpha_estimate.clamp(0.0, 1.0)
 
 
-def _coverage_alpha_loss(
-    alpha_estimate,
-    render_image,
-    gt_image,
-    opt,
-    line_mask=None,
-    camera_alpha_mask=None,
-):
+def _coverage_mask(alpha_estimate, render_image, gt_image, opt, line_mask=None, camera_alpha_mask=None):
     mode = str(opt.coverage_mask_mode).lower()
     mask = torch.ones_like(alpha_estimate)
     gt_luma = _luma(gt_image).detach()
@@ -231,6 +283,18 @@ def _coverage_alpha_loss(
     if camera_alpha_mask is not None:
         mask = mask * camera_alpha_mask.squeeze().detach().float()
 
+    return mask
+
+
+def _coverage_alpha_loss(
+    alpha_estimate,
+    render_image,
+    gt_image,
+    opt,
+    line_mask=None,
+    camera_alpha_mask=None,
+):
+    mask = _coverage_mask(alpha_estimate, render_image, gt_image, opt, line_mask, camera_alpha_mask)
     mask_sum = mask.sum()
     if mask_sum <= 1e-8:
         return None, 0.0, 0.0
@@ -239,6 +303,67 @@ def _coverage_alpha_loss(
     deficit = torch.relu(target - alpha_estimate)
     loss = (mask * deficit * deficit).sum() / mask_sum.clamp_min(1e-8)
     alpha_mean = (mask * alpha_estimate).sum() / mask_sum.clamp_min(1e-8)
+    return loss, alpha_mean.item(), mask.mean().item()
+
+
+def _coverage_opacity_loss(
+    gaussians,
+    coverage_cam,
+    alpha_estimate,
+    render_image,
+    gt_image,
+    opt,
+    line_mask=None,
+    camera_alpha_mask=None,
+):
+    with torch.no_grad():
+        mask = _coverage_mask(alpha_estimate, render_image, gt_image, opt, line_mask, camera_alpha_mask)
+        mask_sum = mask.sum()
+        if mask_sum <= 1e-8:
+            return None, 0.0, 0.0
+
+        target_alpha = float(opt.coverage_alpha_target)
+        pixel_weights = mask * torch.relu(target_alpha - alpha_estimate.detach())
+        if pixel_weights.sum() <= 1e-8:
+            alpha_mean = (mask * alpha_estimate.detach()).sum() / mask_sum.clamp_min(1e-8)
+            return None, alpha_mean.item(), mask.mean().item()
+
+        xyz = gaussians.get_xyz.detach()
+        device = xyz.device
+        dtype = xyz.dtype
+        height = int(coverage_cam.image_height)
+        width = int(coverage_cam.image_width)
+        R = torch.as_tensor(coverage_cam.R, device=device, dtype=dtype)
+        T = torch.as_tensor(coverage_cam.T, device=device, dtype=dtype)
+        cam_points = xyz @ R + T[None, :]
+        z = cam_points[:, 2]
+        znear = max(float(getattr(coverage_cam, "znear", 0.01)), 1e-4)
+        focal_x = width / (2.0 * math.tan(float(coverage_cam.FoVx) * 0.5))
+        focal_y = height / (2.0 * math.tan(float(coverage_cam.FoVy) * 0.5))
+        z_safe = z.clamp_min(znear)
+        u = cam_points[:, 0] / z_safe * focal_x + width * 0.5
+        v = cam_points[:, 1] / z_safe * focal_y + height * 0.5
+        valid = (z > znear) & (u >= 0.0) & (u <= width - 1) & (v >= 0.0) & (v <= height - 1)
+        if not valid.any():
+            alpha_mean = (mask * alpha_estimate.detach()).sum() / mask_sum.clamp_min(1e-8)
+            return None, alpha_mean.item(), mask.mean().item()
+
+        u_idx = u[valid].round().long().clamp(0, width - 1)
+        v_idx = v[valid].round().long().clamp(0, height - 1)
+        gaussian_weights = pixel_weights[v_idx, u_idx]
+        selected = gaussian_weights > 1e-8
+        if not selected.any():
+            alpha_mean = (mask * alpha_estimate.detach()).sum() / mask_sum.clamp_min(1e-8)
+            return None, alpha_mean.item(), mask.mean().item()
+
+        valid_indices = valid.nonzero(as_tuple=False).squeeze(1)[selected]
+        gaussian_weights = gaussian_weights[selected].detach()
+        alpha_mean = (mask * alpha_estimate.detach()).sum() / mask_sum.clamp_min(1e-8)
+
+    opacity = gaussians.get_opacity.squeeze(-1)
+    target_opacity = float(opt.coverage_opacity_target)
+    opacity_deficit = torch.relu(target_opacity - opacity[valid_indices])
+    loss = (gaussian_weights * opacity_deficit * opacity_deficit).sum() / gaussian_weights.sum().clamp_min(1e-8)
     return loss, alpha_mean.item(), mask.mean().item()
 
 
@@ -294,6 +419,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         )
     else:
         coverage_weight_func = lambda _it: opt.coverage_lambda_init
+    coverage_backward_mode = str(opt.coverage_backward_mode).lower()
+    if coverage_loss_active and coverage_backward_mode in ("opacity", "opacity_only", "opacity-only"):
+        print("[Coverage] Using opacity-only coverage backward to avoid an extra rasterizer backward pass.")
+    if coverage_loss_active and int(opt.coverage_render_downsample) > 1:
+        print(f"[Coverage] Rendering alpha regularization at 1/{int(opt.coverage_render_downsample)} resolution.")
     if opt.line_segments_path or opt.line_tracks_path:
         line_segments, line_confidences = load_line_segments_with_confidence(
             obj_path=opt.line_segments_path,
@@ -749,39 +879,88 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss.backward()
 
         if coverage_loss_window:
+            coverage_backward_mode = str(opt.coverage_backward_mode).lower()
+            coverage_opacity_backward = coverage_backward_mode in ("opacity", "opacity_only", "opacity-only")
+            coverage_cam = _make_coverage_camera(viewpoint_cam, opt.coverage_render_downsample)
+            coverage_height = int(coverage_cam.image_height)
+            coverage_width = int(coverage_cam.image_width)
+            coverage_render_reference = _resize_chw(image.detach(), coverage_height, coverage_width)
+            coverage_gt_image = _resize_chw(gt_image, coverage_height, coverage_width)
+            coverage_line_mask = (
+                _resize_hw(line_mask, coverage_height, coverage_width).clamp(0.0, 1.0)
+                if line_mask is not None
+                else None
+            )
             black_bg = torch.zeros((3,), dtype=bg.dtype, device=bg.device)
-            if torch.allclose(bg.detach(), black_bg) and viewpoint_cam.alpha_mask is None:
-                black_reference = image.detach()
-            else:
+            if coverage_opacity_backward:
                 with torch.no_grad():
-                    black_reference = render(
-                        viewpoint_cam,
+                    if torch.allclose(bg.detach(), black_bg) and viewpoint_cam.alpha_mask is None:
+                        black_reference = coverage_render_reference
+                    else:
+                        black_reference = render(
+                            coverage_cam,
+                            gaussians,
+                            pipe,
+                            black_bg,
+                            use_trained_exp=dataset.train_test_exp,
+                            separate_sh=SPARSE_ADAM_AVAILABLE,
+                        )["render"]
+                        if coverage_cam.alpha_mask is not None:
+                            black_reference = black_reference * coverage_cam.alpha_mask.cuda()
+                    alpha_estimate = _estimate_alpha_from_white_background(
+                        coverage_cam,
                         gaussians,
                         pipe,
-                        black_bg,
-                        use_trained_exp=dataset.train_test_exp,
-                        separate_sh=SPARSE_ADAM_AVAILABLE,
-                    )["render"]
-                    if viewpoint_cam.alpha_mask is not None:
-                        black_reference = black_reference * viewpoint_cam.alpha_mask.cuda()
+                        black_reference,
+                        dataset.train_test_exp,
+                        SPARSE_ADAM_AVAILABLE,
+                    )
+            else:
+                if torch.allclose(bg.detach(), black_bg) and viewpoint_cam.alpha_mask is None:
+                    black_reference = coverage_render_reference
+                else:
+                    with torch.no_grad():
+                        black_reference = render(
+                            coverage_cam,
+                            gaussians,
+                            pipe,
+                            black_bg,
+                            use_trained_exp=dataset.train_test_exp,
+                            separate_sh=SPARSE_ADAM_AVAILABLE,
+                        )["render"]
+                        if coverage_cam.alpha_mask is not None:
+                            black_reference = black_reference * coverage_cam.alpha_mask.cuda()
 
-            alpha_estimate = _estimate_alpha_from_white_background(
-                viewpoint_cam,
-                gaussians,
-                pipe,
-                black_reference,
-                dataset.train_test_exp,
-                SPARSE_ADAM_AVAILABLE,
-            )
-            camera_alpha_mask = viewpoint_cam.alpha_mask.cuda() if viewpoint_cam.alpha_mask is not None else None
-            coverage_loss_value, coverage_alpha_mean, coverage_mask_mean = _coverage_alpha_loss(
-                alpha_estimate,
-                image.detach(),
-                gt_image,
-                opt,
-                line_mask=line_mask,
-                camera_alpha_mask=camera_alpha_mask,
-            )
+                alpha_estimate = _estimate_alpha_from_white_background(
+                    coverage_cam,
+                    gaussians,
+                    pipe,
+                    black_reference,
+                    dataset.train_test_exp,
+                    SPARSE_ADAM_AVAILABLE,
+                )
+
+            camera_alpha_mask = coverage_cam.alpha_mask.cuda() if coverage_cam.alpha_mask is not None else None
+            if coverage_opacity_backward:
+                coverage_loss_value, coverage_alpha_mean, coverage_mask_mean = _coverage_opacity_loss(
+                    gaussians,
+                    coverage_cam,
+                    alpha_estimate,
+                    coverage_render_reference,
+                    coverage_gt_image,
+                    opt,
+                    line_mask=coverage_line_mask,
+                    camera_alpha_mask=camera_alpha_mask,
+                )
+            else:
+                coverage_loss_value, coverage_alpha_mean, coverage_mask_mean = _coverage_alpha_loss(
+                    alpha_estimate,
+                    coverage_render_reference,
+                    coverage_gt_image,
+                    opt,
+                    line_mask=coverage_line_mask,
+                    camera_alpha_mask=camera_alpha_mask,
+                )
             if coverage_loss_value is not None and opt.coverage_lambda_adaptive:
                 coverage_weight = (
                     opt.coverage_lambda_target_ratio

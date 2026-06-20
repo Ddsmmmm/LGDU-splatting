@@ -175,6 +175,9 @@ class OptimizationParams(ParamGroup):
         self.coverage_loss_start_iter = 0
         self.coverage_loss_end_iter = 0
         self.coverage_loss_interval = 1
+        self.coverage_backward_mode = "raster"
+        self.coverage_render_downsample = 1
+        self.coverage_opacity_target = 0.8
         self.coverage_alpha_target = 0.98
         self.coverage_mask_mode = "dark"
         self.coverage_dark_threshold = 0.35
