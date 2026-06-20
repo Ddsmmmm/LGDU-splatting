@@ -120,11 +120,25 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
 def fetchPly(path):
     plydata = PlyData.read(path)
     vertices = plydata['vertex']
-    positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
-    colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
-    normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
-    return BasicPointCloud(points=positions, colors=colors, normals=normals)
 
+    positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
+
+    # Colors: allow missing rgb (fallback white)
+    if {'red', 'green', 'blue'}.issubset(vertices.data.dtype.names):
+        colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
+    else:
+        colors = np.ones((positions.shape[0], 3), dtype=np.float32)
+
+    # Normals: allow missing normals (fallback zeros)
+    if {'nx', 'ny', 'nz'}.issubset(vertices.data.dtype.names):
+        normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+    else:
+        normals = np.zeros_like(positions, dtype=np.float32)
+
+    return BasicPointCloud(points=positions, colors=colors, normals=normals)
+    
+    
+    
 def storePly(path, xyz, rgb):
     # Define the dtype for the structured array
     dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
@@ -205,6 +219,10 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     ply_path = os.path.join(path, "sparse/0/points3D.ply")
     bin_path = os.path.join(path, "sparse/0/points3D.bin")
     txt_path = os.path.join(path, "sparse/0/points3D.txt")
+
+    # Your custom init ply (put it here)
+    custom_ply_path = os.path.join(path, "sparse/0/init_points_with_lines.ply")
+
     if not os.path.exists(ply_path):
         print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
         try:
@@ -212,9 +230,15 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
         except:
             xyz, rgb, _ = read_points3D_text(txt_path)
         storePly(ply_path, xyz, rgb)
+
     try:
-        pcd = fetchPly(ply_path)
-    except:
+        if os.path.exists(custom_ply_path):
+            print(f"[Init] Using custom init ply: {custom_ply_path}")
+            pcd = fetchPly(custom_ply_path)
+        else:
+            pcd = fetchPly(ply_path)
+    except Exception as e:
+        print(f"[Init] Failed to load ply: {e}")
         pcd = None
 
     scene_info = SceneInfo(point_cloud=pcd,

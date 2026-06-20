@@ -21,6 +21,7 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+from utils.line_utils import point_to_segment_distance
 
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
@@ -177,6 +178,7 @@ class GaussianModel:
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
+        self.densify_max_points_per_stage = training_args.densify_max_points_per_stage
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
@@ -209,6 +211,23 @@ class GaussianModel:
                                                         lr_delay_steps=training_args.exposure_lr_delay_steps,
                                                         lr_delay_mult=training_args.exposure_lr_delay_mult,
                                                         max_steps=training_args.iterations)
+
+    def _cap_selected_mask(self, selected_pts_mask, scores):
+        max_points = getattr(self, "densify_max_points_per_stage", 0)
+        if max_points is None or max_points <= 0:
+            return selected_pts_mask
+
+        selected_count = int(selected_pts_mask.sum().item())
+        if selected_count <= max_points:
+            return selected_pts_mask
+
+        selected_indices = torch.nonzero(selected_pts_mask, as_tuple=False).squeeze(1)
+        selected_scores = scores[selected_indices]
+        topk = torch.topk(selected_scores, k=max_points, largest=True).indices
+
+        capped_mask = torch.zeros_like(selected_pts_mask, dtype=torch.bool)
+        capped_mask[selected_indices[topk]] = True
+        return capped_mask
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -415,6 +434,11 @@ class GaussianModel:
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
 
+        if hasattr(self, "_line_clone_mask") and self._line_clone_mask is not None:
+            selected_pts_mask = torch.logical_and(selected_pts_mask, self._line_clone_mask)
+
+        selected_pts_mask = self._cap_selected_mask(selected_pts_mask, padded_grad)
+
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
         samples = torch.normal(mean=means, std=stds)
@@ -434,9 +458,15 @@ class GaussianModel:
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
         # Extract points that satisfy the gradient condition
-        selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+        grad_norms = torch.norm(grads, dim=-1)
+        selected_pts_mask = torch.where(grad_norms >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
+
+        if hasattr(self, "_line_clone_mask") and self._line_clone_mask is not None:
+            selected_pts_mask = torch.logical_and(selected_pts_mask, self._line_clone_mask)
+
+        selected_pts_mask = self._cap_selected_mask(selected_pts_mask, grad_norms)
         
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
@@ -449,15 +479,89 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
+    def _line_guided_probs(self, grads, line_segments, line_cfg):
+        xyz = self.get_xyz
+        d = point_to_segment_distance(
+            xyz,
+            line_segments,
+            segment_chunk_size=line_cfg.line_densify_chunk_size,
+            point_chunk_size=line_cfg.line_densify_point_chunk_size,
+        )
+        g = torch.norm(grads, dim=-1)
+        alpha = self.get_opacity.squeeze(-1)
+
+        def _quantile_safe(values, q):
+            if values.numel() == 0:
+                return torch.tensor(0.0, device=values.device)
+            return torch.quantile(values, q)
+
+        sigma = line_cfg.line_densify_sigma
+        if sigma <= 0.0:
+            sigma = _quantile_safe(d, 0.5).item()
+        sigma = max(sigma, 1e-6)
+        w = torch.exp(-0.5 * (d / sigma) ** 2)
+
+        tau_g = line_cfg.line_densify_tau_g
+        if tau_g <= 0.0:
+            tau_g = _quantile_safe(g, 0.7).item()
+
+        tau_d = line_cfg.line_densify_tau_d
+        if tau_d <= 0.0:
+            tau_d = _quantile_safe(d, 0.85).item()
+
+        tau_alpha = line_cfg.line_densify_tau_alpha
+        if tau_alpha <= 0.0:
+            tau_alpha = 0.08
+
+        s_g = line_cfg.line_densify_s_g
+        if s_g <= 0.0:
+            s_g = 0.1 * max(tau_g, 1e-6)
+        s_g = max(s_g, 1e-6)
+
+        s_a = line_cfg.line_densify_s_alpha
+        if s_a <= 0.0:
+            s_a = 0.02
+        s_a = max(s_a, 1e-6)
+
+        s_d = line_cfg.line_densify_s_d
+        if s_d <= 0.0:
+            s_d = 0.1 * max(tau_d, 1e-6)
+        s_d = max(s_d, 1e-6)
+
+        sig_g = torch.sigmoid((g - tau_g) / s_g)
+        sig_a = torch.sigmoid((alpha - tau_alpha) / s_a)
+        p_clone = w * sig_g * sig_a
+
+        sig_d = torch.sigmoid((d - tau_d) / s_d)
+        sig_low_a = torch.sigmoid((tau_alpha - alpha) / s_a)
+        sig_low_g = torch.sigmoid((tau_g - g) / s_g)
+        p_prune = sig_d * sig_low_a * sig_low_g
+
+        return p_clone, p_prune
+
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii, line_segments=None, line_cfg=None, iteration=None):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
+
+        self._line_clone_mask = None
+        line_prune_mask = None
+        if line_segments is not None and line_cfg is not None and line_cfg.line_densify_enable:
+            if line_cfg.line_densify_sigma > 0.0:
+                p_clone, p_prune = self._line_guided_probs(grads, line_segments, line_cfg)
+                self._line_clone_mask = p_clone >= line_cfg.line_densify_clone_prob_thresh
+                if iteration is not None:
+                    if iteration >= line_cfg.line_densify_prune_start_iter:
+                        if line_cfg.line_densify_prune_end_iter <= 0 or iteration <= line_cfg.line_densify_prune_end_iter:
+                            line_prune_mask = p_prune >= line_cfg.line_densify_prune_prob_thresh
 
         self.tmp_radii = radii
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
+        self._line_clone_mask = None
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
+        if line_prune_mask is not None:
+            prune_mask = torch.logical_or(prune_mask, line_prune_mask)
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
