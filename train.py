@@ -421,6 +421,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_coverage_mask_for_log = 0.0
     ema_edge_support_for_log = 0.0
     ema_line_mask_mean_for_log = 0.0
+    cuda_timing_warning_printed = False
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -801,6 +802,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 coverage_loss_value = 0.0
 
         iter_end.record()
+        try:
+            torch.cuda.synchronize()
+            iteration_elapsed_ms = iter_start.elapsed_time(iter_end)
+        except RuntimeError as err:
+            if "device not ready" not in str(err):
+                raise
+            iteration_elapsed_ms = 0.0
+            if not cuda_timing_warning_printed:
+                print("[WARN] CUDA event timing was not ready; falling back to 0.0 ms for logging.")
+                cuda_timing_warning_printed = True
 
         with torch.no_grad():
             # Progress bar
@@ -890,7 +901,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
+            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iteration_elapsed_ms, testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
