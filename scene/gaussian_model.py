@@ -479,16 +479,31 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
-    def _line_guided_probs(self, grads, line_segments, line_cfg):
+    def _line_guided_probs(self, grads, line_segments, line_cfg, line_confidences=None):
         xyz = self.get_xyz
-        d = point_to_segment_distance(
+        d, nearest_line_idx = point_to_segment_distance(
             xyz,
             line_segments,
             segment_chunk_size=line_cfg.line_densify_chunk_size,
             point_chunk_size=line_cfg.line_densify_point_chunk_size,
+            return_indices=True,
         )
         g = torch.norm(grads, dim=-1)
         alpha = self.get_opacity.squeeze(-1)
+
+        if line_confidences is None:
+            nearest_confidence = torch.ones_like(d)
+        else:
+            nearest_confidence = line_confidences[nearest_line_idx].clamp_min(0.0)
+            positive_confidence = nearest_confidence[nearest_confidence > 0.0]
+            if positive_confidence.numel() > 0:
+                nearest_confidence = nearest_confidence / positive_confidence.mean().clamp_min(1e-6)
+        confidence_power = max(float(getattr(line_cfg, "line_densify_confidence_power", 1.0)), 0.0)
+        if confidence_power != 1.0:
+            nearest_confidence = nearest_confidence.clamp_min(0.0).pow(confidence_power)
+        confidence_max = float(getattr(line_cfg, "line_densify_confidence_max", 3.0))
+        if confidence_max > 0.0:
+            nearest_confidence = nearest_confidence.clamp(max=confidence_max)
 
         def _quantile_safe(values, q):
             if values.numel() == 0:
@@ -497,7 +512,11 @@ class GaussianModel:
 
         sigma = line_cfg.line_densify_sigma
         if sigma <= 0.0:
-            sigma = _quantile_safe(d, 0.5).item()
+            if getattr(line_cfg, "line_tau", 0.0) > 0.0:
+                sigma = float(line_cfg.line_tau)
+            else:
+                weighted_distances = d[nearest_confidence > 0.0]
+                sigma = _quantile_safe(weighted_distances, 0.25).item()
         sigma = max(sigma, 1e-6)
         w = torch.exp(-0.5 * (d / sigma) ** 2)
 
@@ -530,33 +549,50 @@ class GaussianModel:
 
         sig_g = torch.sigmoid((g - tau_g) / s_g)
         sig_a = torch.sigmoid((alpha - tau_alpha) / s_a)
-        p_clone = w * sig_g * sig_a
+        sig_low_a = torch.sigmoid((tau_alpha - alpha) / s_a)
+        line_score = w * nearest_confidence
+        low_alpha_boost = max(float(getattr(line_cfg, "line_densify_low_alpha_boost", 0.0)), 0.0)
+        if low_alpha_boost > 0.0:
+            line_score = line_score * (1.0 + low_alpha_boost * sig_low_a)
+        p_clone = line_score * sig_g * sig_a
 
         sig_d = torch.sigmoid((d - tau_d) / s_d)
-        sig_low_a = torch.sigmoid((tau_alpha - alpha) / s_a)
         sig_low_g = torch.sigmoid((tau_g - g) / s_g)
         p_prune = sig_d * sig_low_a * sig_low_g
 
-        return p_clone, p_prune
+        return line_score, p_clone, p_prune
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii, line_segments=None, line_cfg=None, iteration=None):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii, line_segments=None, line_confidences=None, line_cfg=None, iteration=None):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
         self._line_clone_mask = None
         line_prune_mask = None
+        densify_grads = grads
         if line_segments is not None and line_cfg is not None and line_cfg.line_densify_enable:
-            if line_cfg.line_densify_sigma > 0.0:
-                p_clone, p_prune = self._line_guided_probs(grads, line_segments, line_cfg)
-                self._line_clone_mask = p_clone >= line_cfg.line_densify_clone_prob_thresh
-                if iteration is not None:
+            mode = str(getattr(line_cfg, "line_densify_mode", "off")).lower()
+            in_window = True
+            if iteration is not None:
+                start_iter = int(getattr(line_cfg, "line_densify_start_iter", 0))
+                end_iter = int(getattr(line_cfg, "line_densify_end_iter", 0))
+                in_window = iteration >= start_iter and (end_iter <= 0 or iteration <= end_iter)
+            if mode != "off" and in_window:
+                line_score, p_clone, p_prune = self._line_guided_probs(grads, line_segments, line_cfg, line_confidences)
+                if mode in ("score", "soft", "score_boost"):
+                    score_boost = max(float(getattr(line_cfg, "line_densify_score_boost", 1.0)), 0.0)
+                    densify_grads = grads * (1.0 + score_boost * line_score[:, None].detach())
+                elif mode in ("legacy", "legacy_mask", "mask", "hard"):
+                    self._line_clone_mask = p_clone >= line_cfg.line_densify_clone_prob_thresh
+                else:
+                    raise ValueError(f"Unknown line_densify_mode: {mode}")
+                if getattr(line_cfg, "line_densify_prune_enable", False) and iteration is not None:
                     if iteration >= line_cfg.line_densify_prune_start_iter:
                         if line_cfg.line_densify_prune_end_iter <= 0 or iteration <= line_cfg.line_densify_prune_end_iter:
                             line_prune_mask = p_prune >= line_cfg.line_densify_prune_prob_thresh
 
         self.tmp_radii = radii
-        self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split(grads, max_grad, extent)
+        self.densify_and_clone(densify_grads, max_grad, extent)
+        self.densify_and_split(densify_grads, max_grad, extent)
         self._line_clone_mask = None
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()

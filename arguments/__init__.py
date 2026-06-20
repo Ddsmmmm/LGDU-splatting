@@ -194,6 +194,14 @@ class OptimizationParams(ParamGroup):
         self.line_orient_max_points = 2048
         self.line_orient_min_weight = 0.0
         self.line_densify_enable = True
+        self.line_densify_mode = "off"
+        self.line_densify_start_iter = 0
+        self.line_densify_end_iter = 0
+        self.line_densify_score_boost = 1.0
+        self.line_densify_confidence_power = 1.0
+        self.line_densify_confidence_max = 3.0
+        self.line_densify_low_alpha_boost = 0.5
+        self.line_densify_prune_enable = False
         self.line_densify_sigma = 0.0
         self.line_densify_tau_g = 0.0
         self.line_densify_s_g = 0.0

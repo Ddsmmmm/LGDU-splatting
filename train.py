@@ -529,9 +529,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             opt.line_orient_enable
             and (opt.line_orient_lambda_init > 0.0 or opt.line_orient_lambda_final > 0.0)
         )
-        line_densify_active = opt.line_densify_enable
+        line_densify_mode = str(opt.line_densify_mode).lower()
+        if line_densify_mode not in ("off", "score", "soft", "score_boost", "legacy", "legacy_mask", "mask", "hard"):
+            raise ValueError(f"Unknown line_densify_mode: {opt.line_densify_mode}")
+        line_densify_active = opt.line_densify_enable and line_densify_mode != "off"
         if opt.line_densify_enable and opt.line_densify_prune_start_iter <= 0:
             opt.line_densify_prune_start_iter = int(0.6 * opt.iterations)
+        if line_densify_active:
+            print(
+                "[LineDensify] mode={} score_boost={:.3f} sigma={:.5f} confidence_power={:.3f} low_alpha_boost={:.3f}".format(
+                    line_densify_mode,
+                    float(opt.line_densify_score_boost),
+                    float(opt.line_densify_sigma),
+                    float(opt.line_densify_confidence_power),
+                    float(opt.line_densify_low_alpha_boost),
+                )
+            )
 
     viewpoint_stack = scene.getTrainCameras().copy()
     viewpoint_indices = list(range(len(viewpoint_stack)))
@@ -1100,6 +1113,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         size_threshold,
                         radii,
                         line_segments=line_segments if line_densify_active else None,
+                        line_confidences=line_confidences if line_densify_active else None,
                         line_cfg=opt,
                         iteration=iteration,
                     )
