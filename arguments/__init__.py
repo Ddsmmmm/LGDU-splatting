@@ -215,6 +215,22 @@ class OptimizationParams(ParamGroup):
         self.line_densify_prune_end_iter = 0
         self.line_densify_chunk_size = 256
         self.line_densify_point_chunk_size = 4096
+        self.line_unpool_enable = False
+        self.line_unpool_start_iter = 0
+        self.line_unpool_end_iter = 0
+        self.line_unpool_interval = 500
+        self.line_unpool_samples_per_line = 4
+        self.line_unpool_max_points = 1024
+        self.line_unpool_candidate_factor = 4
+        self.line_unpool_min_confidence = 0.0
+        self.line_unpool_support_radius = 0.0
+        self.line_unpool_score_threshold = 0.05
+        self.line_unpool_opacity_init = 0.05
+        self.line_unpool_scale_factor = 0.7
+        self.line_unpool_alpha_target = 0.08
+        self.line_unpool_low_alpha_boost = 0.5
+        self.line_unpool_chunk_size = 256
+        self.line_unpool_point_chunk_size = 4096
         self.densify_max_points_per_stage = 2048
         super().__init__(parser, "Optimization Parameters")
 

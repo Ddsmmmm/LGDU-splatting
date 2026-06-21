@@ -532,7 +532,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         line_densify_mode = str(opt.line_densify_mode).lower()
         if line_densify_mode not in ("off", "score", "soft", "score_boost", "legacy", "legacy_mask", "mask", "hard"):
             raise ValueError(f"Unknown line_densify_mode: {opt.line_densify_mode}")
-        line_densify_active = opt.line_densify_enable and line_densify_mode != "off"
+        line_unpool_active = opt.line_unpool_enable
+        line_densify_active = opt.line_densify_enable and (line_densify_mode != "off" or line_unpool_active)
         if opt.line_densify_enable and opt.line_densify_prune_start_iter <= 0:
             opt.line_densify_prune_start_iter = int(0.6 * opt.iterations)
         if line_densify_active:
@@ -543,6 +544,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     float(opt.line_densify_sigma),
                     float(opt.line_densify_confidence_power),
                     float(opt.line_densify_low_alpha_boost),
+                )
+            )
+        if line_unpool_active:
+            print(
+                "[LineUnpool] interval={} max_points={} samples_per_line={} support_radius={:.5f} opacity_init={:.3f}".format(
+                    int(opt.line_unpool_interval),
+                    int(opt.line_unpool_max_points),
+                    int(opt.line_unpool_samples_per_line),
+                    float(opt.line_unpool_support_radius),
+                    float(opt.line_unpool_opacity_init),
                 )
             )
 
@@ -1117,6 +1128,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         line_cfg=opt,
                         iteration=iteration,
                     )
+                    line_unpool_count = getattr(gaussians, "_last_line_unpool_count", 0)
+                    if line_unpool_count > 0:
+                        print("\n[ITER {}] LineUnpool added {} Gaussians".format(iteration, line_unpool_count))
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()

@@ -479,6 +479,149 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
+    def _normalize_line_confidences_for_densify(self, line_confidences):
+        if line_confidences is None:
+            return None
+        confidences = line_confidences.clamp_min(0.0)
+        positive_confidence = confidences[confidences > 0.0]
+        if positive_confidence.numel() > 0:
+            confidences = confidences / positive_confidence.mean().clamp_min(1e-6)
+        return confidences
+
+    def _nearest_gaussian_for_points(self, points, point_chunk_size=4096, candidate_chunk_size=256):
+        point_chunk_size = max(int(point_chunk_size), 1)
+        candidate_chunk_size = max(int(candidate_chunk_size), 1)
+        xyz = self.get_xyz.detach()
+        nearest_distances = torch.empty((points.shape[0],), device=points.device)
+        nearest_indices = torch.empty((points.shape[0],), dtype=torch.long, device=points.device)
+
+        for c_start in range(0, points.shape[0], candidate_chunk_size):
+            c_end = min(c_start + candidate_chunk_size, points.shape[0])
+            candidate_chunk = points[c_start:c_end]
+            local_min_sq = torch.full((candidate_chunk.shape[0],), float("inf"), device=points.device)
+            local_min_indices = torch.zeros((candidate_chunk.shape[0],), dtype=torch.long, device=points.device)
+
+            for p_start in range(0, xyz.shape[0], point_chunk_size):
+                p_end = min(p_start + point_chunk_size, xyz.shape[0])
+                xyz_chunk = xyz[p_start:p_end]
+                dist2 = ((candidate_chunk[:, None, :] - xyz_chunk[None, :, :]) ** 2).sum(dim=-1)
+                chunk_min_sq, chunk_min_indices = dist2.min(dim=1)
+                improved = chunk_min_sq < local_min_sq
+                local_min_sq = torch.where(improved, chunk_min_sq, local_min_sq)
+                local_min_indices = torch.where(improved, chunk_min_indices + p_start, local_min_indices)
+
+            nearest_distances[c_start:c_end] = torch.sqrt(local_min_sq.clamp_min(0.0))
+            nearest_indices[c_start:c_end] = local_min_indices
+
+        return nearest_distances, nearest_indices
+
+    def line_guided_unpool(self, line_segments, line_confidences, line_cfg, scene_extent):
+        if line_segments is None or line_segments.numel() == 0:
+            return 0
+
+        samples_per_line = max(int(getattr(line_cfg, "line_unpool_samples_per_line", 4)), 1)
+        max_points = max(int(getattr(line_cfg, "line_unpool_max_points", 1024)), 0)
+        if max_points <= 0:
+            return 0
+
+        confidences = self._normalize_line_confidences_for_densify(line_confidences)
+        if confidences is None:
+            confidences = torch.ones((line_segments.shape[0],), device=line_segments.device)
+        confidence_power = max(float(getattr(line_cfg, "line_densify_confidence_power", 1.0)), 0.0)
+        if confidence_power != 1.0:
+            confidences = confidences.clamp_min(0.0).pow(confidence_power)
+        confidence_max = float(getattr(line_cfg, "line_densify_confidence_max", 3.0))
+        if confidence_max > 0.0:
+            confidences = confidences.clamp(max=confidence_max)
+
+        min_confidence = max(float(getattr(line_cfg, "line_unpool_min_confidence", 0.0)), 0.0)
+        valid_lines = confidences >= min_confidence
+        if not valid_lines.any():
+            return 0
+
+        valid_segments = line_segments[valid_lines]
+        valid_confidences = confidences[valid_lines]
+        t = torch.linspace(
+            0.0,
+            1.0,
+            samples_per_line + 2,
+            device=line_segments.device,
+            dtype=line_segments.dtype,
+        )[1:-1]
+        line_starts = valid_segments[:, 0, :]
+        line_ends = valid_segments[:, 1, :]
+        candidates = line_starts[:, None, :] * (1.0 - t[None, :, None]) + line_ends[:, None, :] * t[None, :, None]
+        candidates = candidates.reshape(-1, 3)
+        candidate_confidences = valid_confidences[:, None].repeat(1, samples_per_line).reshape(-1)
+
+        candidate_limit = max_points * max(int(getattr(line_cfg, "line_unpool_candidate_factor", 4)), 1)
+        if candidate_confidences.numel() > candidate_limit:
+            keep = torch.topk(candidate_confidences, k=candidate_limit, largest=True).indices
+            candidates = candidates[keep]
+            candidate_confidences = candidate_confidences[keep]
+
+        nearest_distances, nearest_indices = self._nearest_gaussian_for_points(
+            candidates,
+            point_chunk_size=getattr(line_cfg, "line_unpool_point_chunk_size", 4096),
+            candidate_chunk_size=getattr(line_cfg, "line_unpool_chunk_size", 256),
+        )
+
+        support_radius = float(getattr(line_cfg, "line_unpool_support_radius", 0.0))
+        if support_radius <= 0.0:
+            support_radius = 0.005 * float(scene_extent)
+        support_radius = max(support_radius, 1e-6)
+        support_temperature = max(0.25 * support_radius, 1e-6)
+        sparse_score = torch.sigmoid((nearest_distances - support_radius) / support_temperature)
+
+        nearest_opacity = self.get_opacity[nearest_indices].squeeze(-1)
+        alpha_target = float(getattr(line_cfg, "line_unpool_alpha_target", 0.08))
+        low_alpha_temperature = max(0.25 * max(alpha_target, 1e-6), 1e-6)
+        low_alpha_score = torch.sigmoid((alpha_target - nearest_opacity) / low_alpha_temperature)
+        low_alpha_boost = max(float(getattr(line_cfg, "line_unpool_low_alpha_boost", 0.5)), 0.0)
+
+        candidate_scores = candidate_confidences * sparse_score * (1.0 + low_alpha_boost * low_alpha_score)
+        threshold = float(getattr(line_cfg, "line_unpool_score_threshold", 0.05))
+        selected = candidate_scores >= threshold
+        if not selected.any():
+            return 0
+
+        selected_indices = torch.nonzero(selected, as_tuple=False).squeeze(1)
+        selected_scores = candidate_scores[selected_indices]
+        if selected_indices.numel() > max_points:
+            topk = torch.topk(selected_scores, k=max_points, largest=True).indices
+            selected_indices = selected_indices[topk]
+
+        nearest_indices = nearest_indices[selected_indices]
+        new_xyz = candidates[selected_indices]
+        new_features_dc = self._features_dc[nearest_indices]
+        new_features_rest = self._features_rest[nearest_indices]
+
+        opacity_init = min(max(float(getattr(line_cfg, "line_unpool_opacity_init", 0.05)), 1e-4), 0.99)
+        new_opacities = self.inverse_opacity_activation(
+            opacity_init * torch.ones((selected_indices.shape[0], 1), dtype=self._opacity.dtype, device=self._opacity.device)
+        )
+
+        scale_factor = max(float(getattr(line_cfg, "line_unpool_scale_factor", 0.7)), 1e-3)
+        new_scaling_activated = self.get_scaling[nearest_indices] * scale_factor
+        new_scaling_activated = torch.minimum(
+            new_scaling_activated,
+            support_radius * torch.ones_like(new_scaling_activated),
+        ).clamp_min(1e-5)
+        new_scaling = self.scaling_inverse_activation(new_scaling_activated)
+        new_rotation = self._rotation[nearest_indices]
+        new_tmp_radii = torch.zeros((selected_indices.shape[0],), device="cuda")
+
+        self.densification_postfix(
+            new_xyz,
+            new_features_dc,
+            new_features_rest,
+            new_opacities,
+            new_scaling,
+            new_rotation,
+            new_tmp_radii,
+        )
+        return int(selected_indices.shape[0])
+
     def _line_guided_probs(self, grads, line_segments, line_cfg, line_confidences=None):
         xyz = self.get_xyz
         d, nearest_line_idx = point_to_segment_distance(
@@ -569,6 +712,7 @@ class GaussianModel:
         self._line_clone_mask = None
         line_prune_mask = None
         densify_grads = grads
+        self._last_line_unpool_count = 0
         if line_segments is not None and line_cfg is not None and line_cfg.line_densify_enable:
             mode = str(getattr(line_cfg, "line_densify_mode", "off")).lower()
             in_window = True
@@ -594,6 +738,25 @@ class GaussianModel:
         self.densify_and_clone(densify_grads, max_grad, extent)
         self.densify_and_split(densify_grads, max_grad, extent)
         self._line_clone_mask = None
+
+        if line_segments is not None and line_cfg is not None and getattr(line_cfg, "line_unpool_enable", False):
+            unpool_window = True
+            if iteration is not None:
+                start_iter = int(getattr(line_cfg, "line_unpool_start_iter", 0))
+                end_iter = int(getattr(line_cfg, "line_unpool_end_iter", 0))
+                interval = max(int(getattr(line_cfg, "line_unpool_interval", 500)), 1)
+                unpool_window = (
+                    iteration >= start_iter
+                    and (end_iter <= 0 or iteration <= end_iter)
+                    and iteration % interval == 0
+                )
+            if unpool_window:
+                self._last_line_unpool_count = self.line_guided_unpool(
+                    line_segments,
+                    line_confidences,
+                    line_cfg,
+                    extent,
+                )
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if line_prune_mask is not None:
