@@ -1,63 +1,88 @@
-# EVP-LineSplat
+# LGDU-Splatting
 
-EVP-LineSplat is a research fork of [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) for studying line-guided Gaussian Splatting reconstruction.
+**Line-Guided Densification and Unpooling for 3D Gaussian Splatting**
 
-The current implementation focuses on **edge-verified projected line guidance**:
+LGDU-Splatting is a research fork of [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting). It studies how reliable 3D line structures from LIMAP can guide Gaussian growth, repair local reconstruction failures, and preserve the global rendering quality of 3DGS.
 
-- LIMAP extracts 3D line tracks from COLMAP reconstructions.
-- Multi-view image edge support filters noisy 3D lines.
-- Reliable projected line masks guide 3DGS optimization.
-- The current main variant, **EVP-LineSplat-v2**, uses confidence-aware photometric reweighting near verified projected line regions.
+The current main method is:
 
-This repository is experimental. The current goal is not to replace 3DGS with a fully finalized method, but to provide a controlled implementation for comparing line-guided losses, confidence filtering, and structure-aware reconstruction behavior.
+```text
+edge-verified line confidence
++ projected line photometric reweighting
++ line-aware densification score
++ line-guided unpooling
+```
 
-## Method Status
+Unlike early LineSplat variants that directly pulled Gaussian centers toward noisy 3D line segments, LGDU uses verified line tracks as a structural signal for **where Gaussians should densify or be newly inserted**.
 
-Implemented variants:
+## Method Overview
 
-| Variant | Main idea | Status |
-|---|---|---|
-| No-line | Run this codebase with all line losses disabled | Used as codebase sanity baseline |
-| Edge-center adaptive | Weight Gaussian center-to-line loss by line confidence and projected edge support | Improves some SSIM/LPIPS cases, but can hurt PSNR |
-| EVP-LineSplat-v1 | Multi-view verified projected line mask + image gradient loss | More conservative than center loss, but weak global metric gains |
-| EVP-LineSplat-v2 | Multi-view verified projected line mask + photometric reweighting | Current main variant; best observed LPIPS on `drjohnson` |
+LGDU-Splatting uses the following pipeline:
 
-Planned direction:
+1. LIMAP extracts 3D line tracks from a COLMAP reconstruction.
+2. Line confidence is estimated from visibility and multi-view image-edge support.
+3. Verified projected line regions receive confidence-aware photometric supervision.
+4. During densification, Gaussians near reliable line structures receive a soft densification score boost.
+5. Line-guided unpooling actively inserts new Gaussians along reliable line segments in sparse or low-opacity regions.
 
-- Coverage-aware alpha regularization to reduce transparent holes on dark or low-texture surfaces.
-- Line-region metrics to evaluate projected-line neighborhoods separately from whole-image metrics.
-- More scenes beyond Deep Blending / Tanks and Temples style indoor scenes.
+This makes the method especially useful for 3DGS failure regions such as:
+
+- white holes on dark surfaces,
+- under-covered structural edges,
+- line-like geometry where vanilla densification is insufficient.
+
+## Current Version
+
+Stable branch and tag:
+
+```text
+branch: lgdu-splatting-v1
+tag:    lgdu-splatting-v1.0
+```
+
+The latest tagged version includes:
+
+| Component | Status |
+|---|---|
+| LIMAP `alltracks.txt` line loading | Implemented |
+| Visibility-aware line confidence | Implemented |
+| Multi-view edge verification | Implemented |
+| Projected line photometric reweighting | Implemented |
+| Line-aware densification score | Implemented |
+| Line-guided unpooling | Implemented |
+| Local dark / edge / hole metrics | Implemented |
+| Crop exporter for qualitative comparison | Implemented |
 
 ## Repository Layout
 
-Important files added or modified for this project:
+Important files added or modified for LGDU:
 
 ```text
-train.py                       # 3DGS training with line-guided losses
-utils/line_utils.py             # LIMAP/OBJ line loading, confidence, projection masks
-arguments/__init__.py           # EVP-LineSplat command-line arguments
-metrics_stream.py               # Streaming PSNR/SSIM/LPIPS evaluation
-check_init_ply.py               # Utility for checking initial point cloud state
-scene/gaussian_model.py         # Densification-related extensions
-scene/dataset_readers.py        # Dataset reading adjustments
+train.py                         # 3DGS training with line-guided losses, densification, and unpooling
+scene/gaussian_model.py           # Line-aware densification and line-guided unpooling
+utils/line_utils.py               # LIMAP/OBJ loading, confidence, projected masks, edge support
+arguments/__init__.py             # LGDU command-line arguments
+metrics_stream.py                 # Streaming PSNR/SSIM/LPIPS evaluator
+region_metrics.py                 # Local dark / edge / hole metrics and crop exporter
+region_compare_report.py          # Markdown report generator for local metrics
+check_init_ply.py                 # Utility for checking initial point cloud state
+scene/dataset_readers.py          # Dataset reading adjustments
 ```
 
 Original 3DGS files and license are retained. See [LICENSE.md](LICENSE.md).
 
 ## Requirements
 
-The base environment follows 3DGS. The current `environment.yml` also includes OpenCV, which is required for edge-supported line confidence.
+The base environment follows 3DGS. The local experiments used an environment named `3DGS`.
 
 ```bash
 conda env create --file environment.yml
-conda activate gaussian_splatting
+conda activate 3DGS
 ```
 
-In the local experiments for this project, the environment name was `3DGS`. If your environment has a different name, replace `conda activate 3DGS` in the examples below.
+OpenCV is required for edge-supported line confidence. LIMAP is used in a separate environment named `Limap` in the local experiments.
 
-Required external inputs:
-
-- COLMAP-style dataset:
+Required scene format:
 
 ```text
 <scene>/
@@ -68,20 +93,22 @@ Required external inputs:
     points3D.bin
 ```
 
-- LIMAP 3D line tracks, usually:
+Required LIMAP output:
 
 ```text
 <limap_output>/alltracks.txt
 ```
 
-## Generating LIMAP Lines
+`triangulated_lines_*.obj` is useful for visualization, but LGDU training uses `alltracks.txt` because it contains track-level visibility information.
 
-Example LIMAP command:
+## Generate LIMAP Lines
+
+Example command for `nv6` line tracks:
 
 ```bash
 conda activate Limap
 
-cd /home/ddsm/DownLoad/limap
+cd "/home/ddsm/DownLoad/limap"
 
 python runners/colmap_triangulation.py \
   -a "$(which colmap)" \
@@ -89,22 +116,14 @@ python runners/colmap_triangulation.py \
   -i "/path/to/scene/images" \
   --max_image_dim 1280 \
   -nv 6 \
-  -c "/path/to/limap/output/scene_nv6"
+  --output_dir "/path/to/limap/outputs/scene_nv6"
 ```
 
-The important output for EVP-LineSplat is:
+Important: `-c` / `--config_file` is for a YAML config file. Use `--output_dir` for the output folder.
 
-```text
-/path/to/limap/output/scene_nv6/alltracks.txt
-```
+## Train LGDU-Splatting
 
-`triangulated_lines_*.obj` can be useful for visualization, but the current recommended training path uses `alltracks.txt` because it contains track-level visibility information.
-
-## Training
-
-### 1. Pure no-line baseline using this codebase
-
-Use this to confirm the fork behaves close to original 3DGS when line guidance is disabled.
+This is the current recommended LGDU-Splatting v1 configuration:
 
 ```bash
 conda activate 3DGS
@@ -113,28 +132,7 @@ cd "/home/ddsm/DownLoad/Confidence-Aware-LineSplat/gaussian-splatting"
 
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python train.py \
   --source_path "/path/to/scene" \
-  --model_path "/path/to/output/no_line_pure3dgs_res2" \
-  --eval \
-  --disable_viewer \
-  --data_device cpu \
-  --resolution 2 \
-  --test_iterations -1 \
-  --checkpoint_iterations 7000 15000 30000 \
-  --densify_max_points_per_stage 0
-```
-
-### 2. EVP-LineSplat-v2
-
-This is the current recommended Ours configuration. It disables the old 3D center-to-line loss and uses projected line photometric reweighting.
-
-```bash
-conda activate 3DGS
-
-cd "/home/ddsm/DownLoad/Confidence-Aware-LineSplat/gaussian-splatting"
-
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python train.py \
-  --source_path "/path/to/scene" \
-  --model_path "/path/to/output/evp_v2_photo_nv6_nocap_res2" \
+  --model_path "/path/to/output/lgdu_nv6" \
   --eval \
   --disable_viewer \
   --data_device cpu \
@@ -142,7 +140,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python train.py \
   --test_iterations -1 \
   --checkpoint_iterations 7000 15000 30000 \
   --densify_max_points_per_stage 0 \
-  --line_tracks_path "/path/to/limap/output/scene_nv6/alltracks.txt" \
+  --line_tracks_path "/path/to/limap/outputs/scene_nv6/alltracks.txt" \
   --line_min_visible_views 6 \
   --line_confidence_mode visibility \
   --line_confidence_power 1.0 \
@@ -166,16 +164,31 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python train.py \
   --line_photo_mask_dilation_px 2 \
   --line_photo_min_valid_ratio 0.5 \
   --line_photo_min_projected_length 4.0 \
-  --line_photo_charbonnier_eps 0.001
+  --line_photo_charbonnier_eps 0.001 \
+  --line_densify_mode score \
+  --line_densify_start_iter 500 \
+  --line_densify_end_iter 15000 \
+  --line_densify_score_boost 0.5 \
+  --line_densify_confidence_power 1.0 \
+  --line_densify_confidence_max 3.0 \
+  --line_densify_low_alpha_boost 0.5 \
+  --line_unpool_enable \
+  --line_unpool_start_iter 3000 \
+  --line_unpool_end_iter 12000 \
+  --line_unpool_interval 500 \
+  --line_unpool_samples_per_line 2 \
+  --line_unpool_max_points 512 \
+  --line_unpool_candidate_factor 4 \
+  --line_unpool_score_threshold 0.10 \
+  --line_unpool_opacity_init 0.04 \
+  --line_unpool_scale_factor 0.6 \
+  --line_unpool_alpha_target 0.08 \
+  --line_unpool_low_alpha_boost 0.5
 ```
 
-For full debug logging every 100 iterations:
+Use the same `--resolution` as the 3DGS and Mini-Splatting baselines for fair comparison. The experiments below use `r2` for `drjohnson`, `playroom`, and `counter`, and `r1` for `kitchen`.
 
-```bash
---progress_full_log_interval 100
-```
-
-## Rendering
+## Render
 
 Render test views:
 
@@ -184,16 +197,16 @@ conda activate 3DGS
 
 cd "/home/ddsm/DownLoad/Confidence-Aware-LineSplat/gaussian-splatting"
 
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python render.py \
+python render.py \
   -s "/path/to/scene" \
-  -m "/path/to/output/evp_v2_photo_nv6_nocap_res2" \
+  -m "/path/to/output/lgdu_nv6" \
   --iteration 30000 \
   --skip_train \
   --resolution 2 \
   --data_device cpu
 ```
 
-The metrics script expects:
+The metrics scripts expect:
 
 ```text
 <model_path>/test/ours_30000/renders/
@@ -202,7 +215,7 @@ The metrics script expects:
 
 ## Evaluation
 
-Use the streaming evaluator to avoid loading all images at once:
+Global metrics:
 
 ```bash
 conda activate 3DGS
@@ -212,8 +225,40 @@ cd "/home/ddsm/DownLoad/Confidence-Aware-LineSplat/gaussian-splatting"
 python metrics_stream.py \
   --split test \
   -m "/path/to/3dgs_baseline" \
-     "/path/to/no_line_pure3dgs" \
-     "/path/to/evp_v2_photo_nv6_nocap_res2"
+     "/path/to/mini_splatting" \
+     "/path/to/lgdu"
+```
+
+Local dark / edge / hole metrics and crop export:
+
+```bash
+python region_metrics.py \
+  --split test \
+  --regions dark edge hole \
+  --hole_reference_model "/path/to/3dgs_baseline" \
+  --output_dir "output/region_metrics/scene_lgdu_test" \
+  --crop_export_dir "output/region_crops/scene_lgdu_test" \
+  --num_crops 12 \
+  --crop_region hole \
+  -m "/path/to/3dgs_baseline" \
+     "/path/to/mini_splatting" \
+     "/path/to/lgdu"
+```
+
+Generate a Markdown report:
+
+```bash
+python region_compare_report.py \
+  --results "output/region_metrics/scene_lgdu_test/region_results_test.json" \
+  --per_view "output/region_metrics/scene_lgdu_test/region_per_view_test.json" \
+  --baseline "scene_eval_baseline_3dgs" \
+  --methods \
+    "scene_eval_baseline_3dgs" \
+    "scene_eval_mini_splatting" \
+    "scene_eval_lgdu" \
+  --regions dark edge hole \
+  --crop_dir "output/region_crops/scene_lgdu_test" \
+  --output "output/region_metrics/scene_lgdu_test/region_comparison_report.md"
 ```
 
 Metrics:
@@ -222,36 +267,96 @@ Metrics:
 - SSIM: higher is better.
 - LPIPS: lower is better.
 
-For perceptual quality, LPIPS and local crop comparisons are usually more informative than PSNR alone. For line-guided methods, whole-image averages can dilute improvements that occur mainly around structural edges.
+Whole-image averages can dilute structural improvements. For line-guided methods, the local dark / edge / hole metrics and exported crops are important.
 
-See [results.md](results.md) for current experiment records.
+## Experiment Summary
 
-## Current Findings
-
-Observed behavior so far:
-
-- Direct 3D center-to-line loss can improve some structure scores but may reduce PSNR.
-- Image-space projected line losses are safer than forcing Gaussian centers onto noisy 3D line segments.
-- EVP-LineSplat-v2 achieved the best LPIPS among tested variants on `drjohnson`, but did not yet dominate PSNR/SSIM.
-- Mini-Splatting can look visually cleaner in the viewer because it explicitly repairs low-alpha / low-coverage regions; EVP-LineSplat does not yet include that mechanism.
-
-Next implementation target:
+The following results compare:
 
 ```text
-Coverage-aware EVP-LineSplat:
-  EVP-v2 line photometric reweighting
-  + alpha coverage regularization
-  + optional low-alpha surface repair
+3DGS: vanilla 3D Gaussian Splatting
+Mini: Mini-Splatting
+LGDU: LGDU-Splatting v1.0
 ```
 
-This target is motivated by observed white holes on dark table surfaces in 3DGS/Ours viewer outputs.
+### Global Metrics
+
+| Scene | Resolution | Method | PSNR | SSIM | LPIPS |
+|---|---:|---|---:|---:|---:|
+| drjohnson | r2 | 3DGS | 29.6548 | 0.91286 | 0.13901 |
+| drjohnson | r2 | Mini | 29.7897 | 0.91110 | 0.15960 |
+| drjohnson | r2 | LGDU | 29.7431 | 0.91284 | 0.13807 |
+| playroom | r2 | 3DGS | 30.4723 | 0.92675 | 0.13717 |
+| playroom | r2 | Mini | 30.6869 | 0.92816 | 0.14955 |
+| playroom | r2 | LGDU | 30.4856 | 0.92600 | 0.13802 |
+| counter | r2 | 3DGS | 30.3106 | 0.94141 | 0.06218 |
+| counter | r2 | Mini | 29.2275 | 0.92343 | 0.08112 |
+| counter | r2 | LGDU | 30.2934 | 0.94173 | 0.06201 |
+| kitchen | r1 | 3DGS | 32.1701 | 0.94846 | 0.06685 |
+| kitchen | r1 | Mini | 31.0743 | 0.93358 | 0.08861 |
+| kitchen | r1 | LGDU | 32.3517 | 0.94916 | 0.06613 |
+
+### LGDU vs 3DGS Global Delta
+
+| Scene | Delta PSNR | Delta SSIM | Delta LPIPS | Summary |
+|---|---:|---:|---:|---|
+| drjohnson | +0.0884 | -0.00002 | -0.00095 | PSNR/LPIPS improve, SSIM nearly tied |
+| playroom | +0.0134 | -0.00075 | +0.00085 | Global metrics nearly tied; local hole quality improves strongly |
+| counter | -0.0172 | +0.00032 | -0.00017 | Nearly tied; SSIM/LPIPS slightly improve |
+| kitchen | +0.1816 | +0.00070 | -0.00071 | All global metrics improve |
+
+### Hole-Region Metrics
+
+| Scene | Method | Hole PSNR | Hole SSIM | Hole LPIPS |
+|---|---|---:|---:|---:|
+| drjohnson | 3DGS | 10.3297 | 0.97418 | 0.03113 |
+| drjohnson | Mini | 12.8215 | 0.97867 | 0.02499 |
+| drjohnson | LGDU | 11.9538 | 0.97859 | 0.02791 |
+| playroom | 3DGS | 11.7252 | 0.98029 | 0.02893 |
+| playroom | Mini | 12.4723 | 0.98061 | 0.02987 |
+| playroom | LGDU | 12.7615 | 0.98153 | 0.02471 |
+| counter | 3DGS | 14.0211 | 0.98625 | 0.01173 |
+| counter | Mini | 15.7869 | 0.99001 | 0.00719 |
+| counter | LGDU | 15.3808 | 0.99005 | 0.00784 |
+| kitchen | 3DGS | 9.8581 | 0.97854 | 0.02707 |
+| kitchen | Mini | 16.5058 | 0.99157 | 0.01069 |
+| kitchen | LGDU | 11.4957 | 0.98466 | 0.01993 |
+
+LGDU improves hole-region PSNR over 3DGS on all four scenes:
+
+```text
+drjohnson: +1.6241
+playroom : +1.0363
+counter  : +1.3597
+kitchen  : +1.6376
+```
+
+### Local Region Findings
+
+| Scene | Main local observation |
+|---|---|
+| drjohnson | LGDU improves edge and hole regions; global PSNR/LPIPS also improve over 3DGS. |
+| playroom | LGDU improves dark, edge, and hole regions over 3DGS; hole metrics exceed Mini-Splatting. |
+| counter | LGDU is globally near-tied with 3DGS and strongly improves hole regions; Mini repairs holes but degrades global/dark/edge quality. |
+| kitchen | LGDU improves global metrics and dark, edge, and hole regions over 3DGS; Mini has strong hole metrics but degrades global/dark/edge quality. |
+
+## Current Conclusion
+
+LGDU-Splatting is best understood as a structure-guided improvement to 3DGS:
+
+```text
+It preserves or slightly improves whole-image 3DGS quality,
+while consistently improving line-related failure regions such as holes and structural edges.
+```
+
+Compared with Mini-Splatting, LGDU is less aggressive in some hole-only metrics, but it better preserves global, dark-region, and edge-region quality across the tested scenes.
 
 ## Git Remotes
 
 This local fork uses:
 
 ```text
-origin   https://github.com/Ddsmmmm/LineSplat.git
+origin   git@github.com:Ddsmmmm/LineSplat.git
 upstream https://github.com/graphdeco-inria/gaussian-splatting.git
 ```
 
