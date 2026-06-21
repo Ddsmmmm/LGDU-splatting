@@ -1,10 +1,12 @@
 # Experiment Results
 
-This file records the current local experiment results for EVP-LineSplat variants. Values are computed on rendered `test` views using:
+This file summarizes the current quantitative results for **LGDU-Splatting**:
 
-```bash
-python metrics_stream.py --split test -m <model_paths...>
+```text
+Line-Guided Densification and Unpooling for 3D Gaussian Splatting
 ```
+
+All values are computed on rendered `test` views.
 
 Metric convention:
 
@@ -12,130 +14,151 @@ Metric convention:
 - SSIM: higher is better.
 - LPIPS: lower is better.
 
-## DrJohnson
+The reported local-region metrics use `region_metrics.py` with the vanilla 3DGS render as the hole-mask reference. This makes all methods compare on the same dark / edge / hole masks.
 
-Dataset path used locally:
+## Main Quantitative Results
 
-```text
-/home/ddsm/DownLoad/Confidence-Aware-LineSplat/gaussian-splatting/data/drjohnson
-```
+This table is the current main result summary. It combines whole-image metrics with hole-region metrics, because LGDU is designed to preserve global quality while repairing line-related failure regions.
 
-LIMAP line tracks:
+| Scene | Res. | Method | Global PSNR ↑ | Global SSIM ↑ | Global LPIPS ↓ | Hole PSNR ↑ | Hole SSIM ↑ | Hole LPIPS ↓ |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| drjohnson | r2 | 3DGS | 29.6548 | 0.91286 | 0.13901 | 10.3297 | 0.97418 | 0.03113 |
+| drjohnson | r2 | Mini-Splatting | **29.7897** | 0.91110 | 0.15960 | **12.8215** | **0.97867** | **0.02499** |
+| drjohnson | r2 | **LGDU** | 29.7431 | **0.91284** | **0.13807** | 11.9538 | 0.97859 | 0.02791 |
+| playroom | r2 | 3DGS | 30.4723 | 0.92675 | **0.13717** | 11.7252 | 0.98029 | 0.02893 |
+| playroom | r2 | Mini-Splatting | **30.6869** | **0.92816** | 0.14955 | 12.4723 | 0.98061 | 0.02987 |
+| playroom | r2 | **LGDU** | 30.4856 | 0.92600 | 0.13802 | **12.7615** | **0.98153** | **0.02471** |
+| counter | r2 | 3DGS | **30.3106** | 0.94141 | 0.06218 | 14.0211 | 0.98625 | 0.01173 |
+| counter | r2 | Mini-Splatting | 29.2275 | 0.92343 | 0.08112 | **15.7869** | 0.99001 | **0.00719** |
+| counter | r2 | **LGDU** | 30.2934 | **0.94173** | **0.06201** | 15.3808 | **0.99005** | 0.00784 |
+| kitchen | r1 | 3DGS | 32.1701 | 0.94846 | 0.06685 | 9.8581 | 0.97854 | 0.02707 |
+| kitchen | r1 | Mini-Splatting | 31.0743 | 0.93358 | 0.08861 | **16.5058** | **0.99157** | **0.01069** |
+| kitchen | r1 | **LGDU** | **32.3517** | **0.94916** | **0.06613** | 11.4957 | 0.98466 | 0.01993 |
 
-```text
-/home/ddsm/DownLoad/limap/outputs/drjohnson/drjohnson_nv6/alltracks.txt
-```
+## LGDU vs 3DGS
 
-Evaluation split:
-
-```text
---eval, resolution 2, test views: 33
-```
-
-| Method | SSIM ↑ | PSNR ↑ | LPIPS ↓ | Notes |
-|---|---:|---:|---:|---|
-| 3DGS | 0.9128616 | 29.6547909 | 0.1390142 | Original 3DGS baseline |
-| No-line pure3DGS | 0.9128566 | 29.6300488 | 0.1383264 | This codebase with line guidance disabled |
-| Mini-Splatting | 0.9110953 | **29.7897034** | 0.1596022 | Best PSNR, weaker perceptual score |
-| Edge-center adaptive | **0.9130062** | 29.5559807 | 0.1388844 | Best SSIM, but PSNR drops |
-| EVP-LineSplat-v1 | 0.9122745 | 29.6463909 | 0.1388366 | Projected line gradient loss |
-| EVP-LineSplat-v2 | 0.9128430 | 29.6245480 | **0.1381441** | Current main variant; best LPIPS |
-
-Current interpretation:
-
-- Mini-Splatting achieves the highest PSNR, but LPIPS is substantially worse.
-- Edge-center adaptive improves SSIM slightly, but harms PSNR.
-- EVP-LineSplat-v2 gives the best LPIPS, indicating better perceptual quality, but does not yet dominate PSNR/SSIM.
-- Whole-image metrics may under-represent improvements around projected line structures.
-
-## Playroom
-
-Dataset path used locally:
+LGDU is not intended to maximize hole-only scores at the cost of the whole image. The target behavior is:
 
 ```text
-/home/ddsm/DownLoad/Confidence-Aware-LineSplat/gaussian-splatting/data
+preserve or improve global 3DGS quality
++ improve hole / edge / dark failure regions
 ```
 
-Evaluation split:
+| Scene | Delta Global PSNR | Delta Global SSIM | Delta Global LPIPS | Delta Hole PSNR | Delta Hole SSIM | Delta Hole LPIPS |
+|---|---:|---:|---:|---:|---:|---:|
+| drjohnson | +0.0884 | -0.00002 | -0.00095 | +1.6241 | +0.00441 | -0.00322 |
+| playroom | +0.0134 | -0.00075 | +0.00085 | +1.0363 | +0.00124 | -0.00422 |
+| counter | -0.0172 | +0.00032 | -0.00017 | +1.3597 | +0.00380 | -0.00389 |
+| kitchen | +0.1816 | +0.00070 | -0.00071 | +1.6376 | +0.00612 | -0.00714 |
+
+Summary:
+
+- LGDU improves hole-region PSNR on all four scenes.
+- LGDU improves or nearly preserves whole-image PSNR/SSIM/LPIPS on all four scenes.
+- The largest global gain appears on `kitchen`.
+- The strongest hole-region win over Mini-Splatting appears on `playroom`.
+
+## Local Dark / Edge Region Metrics
+
+These local regions are useful because line-guided methods often affect structural or under-covered areas more than the full image average.
+
+### Dark Region
+
+| Scene | Method | Dark PSNR ↑ | Dark SSIM ↑ | Dark LPIPS ↓ |
+|---|---|---:|---:|---:|
+| drjohnson | 3DGS | 29.7285 | **0.94739** | **0.07443** |
+| drjohnson | LGDU | **29.7859** | 0.94712 | **0.07443** |
+| playroom | 3DGS | 28.6304 | 0.97302 | 0.03853 |
+| playroom | LGDU | **28.7072** | **0.97328** | **0.03822** |
+| counter | 3DGS | **33.3057** | 0.96921 | **0.03599** |
+| counter | LGDU | 33.2867 | **0.96925** | 0.03606 |
+| kitchen | 3DGS | 31.2971 | 0.98848 | 0.01730 |
+| kitchen | LGDU | **31.5306** | **0.98888** | **0.01670** |
+
+### Edge Region
+
+| Scene | Method | Edge PSNR ↑ | Edge SSIM ↑ | Edge LPIPS ↓ |
+|---|---|---:|---:|---:|
+| drjohnson | 3DGS | 26.3984 | 0.95084 | 0.06109 |
+| drjohnson | LGDU | **26.4778** | **0.95135** | **0.06002** |
+| playroom | 3DGS | 27.2588 | 0.95791 | 0.05883 |
+| playroom | LGDU | **27.2719** | **0.95829** | **0.05769** |
+| counter | 3DGS | **27.1027** | **0.97114** | **0.02897** |
+| counter | LGDU | 27.0554 | **0.97114** | 0.02903 |
+| kitchen | 3DGS | 29.8555 | 0.97909 | 0.02919 |
+| kitchen | LGDU | **30.0036** | **0.97950** | **0.02882** |
+
+## Scene-Level Analysis
+
+### drjohnson
+
+LGDU improves global PSNR and LPIPS over 3DGS while keeping SSIM essentially tied. Locally, LGDU improves both edge and hole regions. Mini-Splatting has stronger hole PSNR/LPIPS, but its global LPIPS is substantially worse.
+
+### playroom
+
+LGDU gives the strongest hole-region result among the three methods. Qualitative inspection also shows LGDU better preserves line structures than Mini-Splatting. Whole-image metrics remain close to 3DGS.
+
+### counter
+
+LGDU is globally near-tied with 3DGS and clearly improves the hole region. Mini-Splatting repairs holes aggressively, but degrades global, dark-region, and edge-region quality on this scene.
+
+### kitchen
+
+This is the strongest LGDU scene so far. LGDU improves all global metrics over 3DGS and also improves dark, edge, and hole local regions. Mini-Splatting has very strong hole metrics, but performs much worse globally and on dark/edge regions.
+
+## Current Conclusion
+
+Across four tested scenes, LGDU-Splatting shows a consistent pattern:
 
 ```text
---eval, resolution 2, test views: 29
+LGDU preserves or slightly improves whole-image 3DGS reconstruction quality,
+while consistently improving hole/failure regions and often improving structural edge regions.
 ```
 
-| Method | SSIM ↑ | PSNR ↑ | LPIPS ↓ | Notes |
-|---|---:|---:|---:|---|
-| 3DGS | 0.9267502 | 30.4722576 | 0.1371734 | Original 3DGS baseline |
-| No-line pure3DGS | 0.9262590 | 30.4242325 | 0.1371497 | This codebase with line guidance disabled |
-| Mini-Splatting | **0.9281572** | **30.6869240** | 0.1495531 | Best PSNR/SSIM, weaker LPIPS |
-| Visibility adaptive | 0.9260339 | 30.4887085 | 0.1375082 | Earlier confidence-aware line variant |
-| Edge-orient | 0.9266110 | 30.3845959 | 0.1375450 | Orientation loss was not stable enough |
-| Edge-center adaptive | 0.9274006 | 30.4953423 | **0.1366614** | Best LPIPS among listed methods |
+Compared with Mini-Splatting:
 
-Current interpretation:
+- Mini-Splatting can be stronger on hole-only PSNR/LPIPS in some scenes.
+- Mini-Splatting often degrades global or dark/edge quality.
+- LGDU provides a better balance between global fidelity and local failure-region repair.
 
-- Mini-Splatting is strongest on PSNR/SSIM for this scene, but LPIPS is worse.
-- Edge-center adaptive improves LPIPS and slightly improves PSNR over 3DGS.
-- Orientation alignment is not recommended as a default main loss.
+This supports using LGDU as a structure-aware 3DGS improvement rather than a hole-only repair method.
 
-## Method Notes
+## Reproducibility Notes
 
-### Why LPIPS matters here
-
-Line-guided methods primarily target structural regions: edges, contours, and object boundaries. Whole-image PSNR can penalize small edge shifts and may prefer smoother images. LPIPS is usually more aligned with perceptual visual quality, especially when comparing local structure and sharpness.
-
-For paper reporting, use all three metrics, but include local crop comparisons around line-rich regions.
-
-### Known limitation: white holes on dark surfaces
-
-Viewer inspection showed that Mini-Splatting can produce cleaner dark surfaces than 3DGS/Ours. This is likely because Mini-Splatting explicitly repairs low-alpha / low-coverage pixels by sampling from:
-
-```text
-prob = 1 - accum_alpha
-```
-
-and reinitializing Gaussians on under-covered regions.
-
-Current EVP-LineSplat variants do not yet include an alpha coverage repair mechanism. This motivates the next step:
-
-```text
-Coverage-aware EVP-LineSplat
-```
-
-Expected components:
-
-- Surface alpha coverage regularization.
-- Optional low-alpha region repair.
-- Keep EVP-v2 photometric reweighting as the line-structure guidance.
-
-## Reproducibility Checklist
-
-For fair comparison, use:
+Fair comparison settings used in these experiments:
 
 ```text
 --eval
---resolution 2
 --data_device cpu
 --test_iterations -1
 --checkpoint_iterations 7000 15000 30000
---densify_max_points_per_stage 0
 ```
 
-Render before metrics:
+Resolution:
 
-```bash
-python render.py \
-  -s <scene_path> \
-  -m <model_path> \
-  --iteration 30000 \
-  --skip_train \
-  --resolution 2 \
-  --data_device cpu
+```text
+drjohnson: r2
+playroom : r2
+counter  : r2
+kitchen  : r1
 ```
 
-Evaluate:
+LGDU uses:
+
+```text
+LIMAP nv6 alltracks.txt
+line-aware densification score
+line-guided unpooling
+```
+
+Evaluation commands:
 
 ```bash
-python metrics_stream.py \
+python metrics_stream.py --split test -m <model_paths...>
+
+python region_metrics.py \
   --split test \
-  -m <model_path_1> <model_path_2> ...
+  --regions dark edge hole \
+  --hole_reference_model <3dgs_baseline> \
+  -m <model_paths...>
 ```
