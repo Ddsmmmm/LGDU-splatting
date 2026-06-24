@@ -73,6 +73,14 @@ class PipelineParams(ParamGroup):
         self.mip_filter_scale = 0.4472135955
         self.mip_filter_margin = 0.15
         self.mip_filter_update_interval = 100
+        self.smip_enable = False
+        self.smip_line_sigma = 0.0
+        self.smip_filter_base_weight = 0.0
+        self.smip_filter_gain = 1.0
+        self.smip_filter_max_weight = 1.5
+        self.smip_opacity_compensation = 0.35
+        self.smip_low_alpha_boost = 0.5
+        self.smip_alpha_target = 0.08
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):

@@ -384,6 +384,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
     train_cameras_for_filter = scene.getTrainCameras().copy()
+    smip_active = bool(getattr(pipe, "smip_enable", False))
+    if smip_active:
+        pipe.mip_filter_enable = True
     mip_filter_active = bool(getattr(pipe, "mip_filter_enable", False))
     mip_filter_update_interval = max(int(getattr(pipe, "mip_filter_update_interval", 100)), 1)
     if mip_filter_active:
@@ -563,6 +566,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     int(opt.line_unpool_samples_per_line),
                     float(opt.line_unpool_support_radius),
                     float(opt.line_unpool_opacity_init),
+                )
+            )
+
+    if smip_active:
+        if line_segments is None:
+            print("[SMip] Enabled, but no line segments were loaded. Falling back to global Mip-style filtering.")
+        else:
+            gaussians.update_smip_filter_weights(line_segments, line_confidences, pipe)
+            print(
+                "[SMip] Selective Mip enabled. filter_weight min/mean/max: {:.4f}/{:.4f}/{:.4f}; opacity_comp={:.3f}".format(
+                    gaussians.mip_filter_weight.min().item(),
+                    gaussians.mip_filter_weight.mean().item(),
+                    gaussians.mip_filter_weight.max().item(),
+                    float(getattr(pipe, "smip_opacity_compensation", 0.35)),
                 )
             )
 
@@ -1146,6 +1163,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             filter_scale=getattr(pipe, "mip_filter_scale", 0.4472135955),
                             screen_margin=getattr(pipe, "mip_filter_margin", 0.15),
                         )
+                        if smip_active and line_segments is not None:
+                            gaussians.update_smip_filter_weights(line_segments, line_confidences, pipe)
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
@@ -1155,6 +1174,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     filter_scale=getattr(pipe, "mip_filter_scale", 0.4472135955),
                     screen_margin=getattr(pipe, "mip_filter_margin", 0.15),
                 )
+                if smip_active and line_segments is not None:
+                    gaussians.update_smip_filter_weights(line_segments, line_confidences, pipe)
 
             # Optimizer step
             if iteration < opt.iterations:
