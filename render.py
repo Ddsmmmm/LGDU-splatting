@@ -49,6 +49,12 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+        if getattr(pipeline, "mip_filter_enable", False) and not gaussians.has_3D_filter():
+            gaussians.compute_3D_filter(
+                scene.getTrainCameras(),
+                filter_scale=getattr(pipeline, "mip_filter_scale", 0.4472135955),
+                screen_margin=getattr(pipeline, "mip_filter_margin", 0.15),
+            )
 
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")

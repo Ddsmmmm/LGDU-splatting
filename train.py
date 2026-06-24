@@ -383,6 +383,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    train_cameras_for_filter = scene.getTrainCameras().copy()
+    mip_filter_active = bool(getattr(pipe, "mip_filter_enable", False))
+    mip_filter_update_interval = max(int(getattr(pipe, "mip_filter_update_interval", 100)), 1)
+    if mip_filter_active:
+        gaussians.compute_3D_filter(
+            train_cameras_for_filter,
+            filter_scale=getattr(pipe, "mip_filter_scale", 0.4472135955),
+            screen_margin=getattr(pipe, "mip_filter_margin", 0.15),
+        )
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -1131,9 +1140,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     line_unpool_count = getattr(gaussians, "_last_line_unpool_count", 0)
                     if line_unpool_count > 0:
                         print("\n[ITER {}] LineUnpool added {} Gaussians".format(iteration, line_unpool_count))
+                    if mip_filter_active:
+                        gaussians.compute_3D_filter(
+                            train_cameras_for_filter,
+                            filter_scale=getattr(pipe, "mip_filter_scale", 0.4472135955),
+                            screen_margin=getattr(pipe, "mip_filter_margin", 0.15),
+                        )
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
+            elif mip_filter_active and iteration % mip_filter_update_interval == 0 and iteration < opt.iterations - mip_filter_update_interval:
+                gaussians.compute_3D_filter(
+                    train_cameras_for_filter,
+                    filter_scale=getattr(pipe, "mip_filter_scale", 0.4472135955),
+                    screen_margin=getattr(pipe, "mip_filter_margin", 0.15),
+                )
 
             # Optimizer step
             if iteration < opt.iterations:

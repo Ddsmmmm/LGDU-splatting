@@ -69,6 +69,10 @@ class PipelineParams(ParamGroup):
         self.compute_cov3D_python = False
         self.debug = False
         self.antialiasing = False
+        self.mip_filter_enable = False
+        self.mip_filter_scale = 0.4472135955
+        self.mip_filter_margin = 0.15
+        self.mip_filter_update_interval = 100
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):
