@@ -419,7 +419,7 @@ The 2026-06-24 comparison shows:
 - Mip-Splatting remains a very strong baseline, especially for SSIM/LPIPS and dark/hole-region perceptual metrics.
 - LGDU and Mip-Splatting are complementary: LGDU is strongest as a line-structure-aware local repair method, while Mip-Splatting is strongest as a scale-aware perceptual baseline.
 
-Recommended paper positioning:
+
 
 ```text
 LGDU-Splatting consistently improves vanilla 3DGS in local hole/edge failure regions,
