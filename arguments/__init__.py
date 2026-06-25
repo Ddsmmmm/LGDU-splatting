@@ -118,6 +118,16 @@ class OptimizationParams(ParamGroup):
         self.line_confidence_power = 1.0
         self.line_confidence_min = 0.05
         self.line_confidence_percentile = 0.0
+        self.line_gaussian_refine_enable = False
+        self.line_gaussian_refine_start_iter = 0
+        self.line_gaussian_refine_radius = 0.0
+        self.line_gaussian_refine_radius_scale = 3.0
+        self.line_gaussian_refine_density_power = 1.0
+        self.line_gaussian_refine_opacity_power = 1.0
+        self.line_gaussian_refine_opacity_target = 0.08
+        self.line_gaussian_refine_blend = 0.7
+        self.line_gaussian_refine_min_weight = 0.0
+        self.line_gaussian_refine_max_weight = 2.0
         self.line_tau = 0.0
         self.line_lambda_init = 0.0
         self.line_lambda_final = 0.0

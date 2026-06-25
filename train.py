@@ -70,6 +70,112 @@ def _apply_confidence_percentile(confidences, percentile):
     return filtered, threshold.item(), int(keep.sum().item())
 
 
+def _normalize_by_positive_median(values):
+    positive = values > 0.0
+    if not positive.any():
+        return values
+    normalized = values.clone()
+    scale = torch.quantile(values[positive].detach(), 0.5).clamp_min(1e-8)
+    normalized[positive] = normalized[positive] / scale
+    return normalized
+
+
+@torch.no_grad()
+def _apply_gaussian_refined_line_confidence(line_segments, line_confidences, gaussians, scene_extent, opt):
+    if line_segments is None or line_segments.numel() == 0:
+        return line_confidences, None
+    if gaussians.get_xyz.numel() == 0:
+        return line_confidences, None
+
+    radius = float(opt.line_gaussian_refine_radius)
+    if radius <= 0.0:
+        radius = float(opt.line_tau) if float(opt.line_tau) > 0.0 else 0.005 * float(scene_extent)
+    radius = max(radius, 1e-8)
+    radius_scale = max(float(opt.line_gaussian_refine_radius_scale), 1.0)
+
+    distances, nearest_line_idx = point_to_segment_distance(
+        gaussians.get_xyz.detach(),
+        line_segments,
+        segment_chunk_size=getattr(opt, "line_densify_chunk_size", 256),
+        point_chunk_size=getattr(opt, "line_densify_point_chunk_size", 4096),
+        return_indices=True,
+    )
+    support_mask = distances <= radius * radius_scale
+    n_lines = line_segments.shape[0]
+    support_sum = torch.zeros((n_lines,), dtype=torch.float32, device=line_segments.device)
+    opacity_sum = torch.zeros_like(support_sum)
+
+    if support_mask.any():
+        support_distances = distances[support_mask]
+        support_indices = nearest_line_idx[support_mask]
+        support_weights = torch.exp(-0.5 * (support_distances / radius) ** 2).to(torch.float32)
+        opacity = gaussians.get_opacity.detach().squeeze(-1)[support_mask].to(torch.float32)
+        support_sum.scatter_add_(0, support_indices, support_weights)
+        opacity_sum.scatter_add_(0, support_indices, support_weights * opacity)
+
+    line_lengths = torch.linalg.norm(line_segments[:, 1, :] - line_segments[:, 0, :], dim=-1).clamp_min(1e-8)
+    density = support_sum / (line_lengths / radius).clamp_min(1.0)
+    opacity_mean = opacity_sum / support_sum.clamp_min(1e-8)
+
+    density_score = _normalize_by_positive_median(density).clamp_min(0.0)
+    opacity_target = max(float(opt.line_gaussian_refine_opacity_target), 1e-6)
+    opacity_score = (opacity_mean / opacity_target).clamp_min(0.0)
+    density_power = max(float(opt.line_gaussian_refine_density_power), 0.0)
+    opacity_power = max(float(opt.line_gaussian_refine_opacity_power), 0.0)
+    refine_weight = density_score.pow(density_power) * opacity_score.pow(opacity_power)
+
+    min_weight = max(float(opt.line_gaussian_refine_min_weight), 0.0)
+    max_weight = float(opt.line_gaussian_refine_max_weight)
+    refine_weight = refine_weight.clamp_min(min_weight)
+    if max_weight > 0.0:
+        refine_weight = refine_weight.clamp(max=max_weight)
+
+    blend = min(max(float(opt.line_gaussian_refine_blend), 0.0), 1.0)
+    blended_weight = (1.0 - blend) + blend * refine_weight
+    refined_confidences = line_confidences * blended_weight
+    refined_confidences = _renormalize_positive_confidences(refined_confidences)
+
+    valid_support = support_sum > 0.0
+    stats = {
+        "radius": radius,
+        "supported": int(valid_support.sum().item()),
+        "total": int(n_lines),
+        "density_mean": float(density[valid_support].mean().item()) if valid_support.any() else 0.0,
+        "opacity_mean": float(opacity_mean[valid_support].mean().item()) if valid_support.any() else 0.0,
+        "weight_min": float(refine_weight.min().item()) if refine_weight.numel() > 0 else 0.0,
+        "weight_mean": float(refine_weight.mean().item()) if refine_weight.numel() > 0 else 0.0,
+        "weight_max": float(refine_weight.max().item()) if refine_weight.numel() > 0 else 0.0,
+        "confidence_min": float(refined_confidences.min().item()) if refined_confidences.numel() > 0 else 0.0,
+        "confidence_mean": float(refined_confidences.mean().item()) if refined_confidences.numel() > 0 else 0.0,
+        "confidence_max": float(refined_confidences.max().item()) if refined_confidences.numel() > 0 else 0.0,
+    }
+    return refined_confidences, stats
+
+
+def _print_gaussian_refine_stats(iteration, stats):
+    if stats is None:
+        print("[Line] Gaussian-refined confidence skipped: no valid line/Gaussian support.")
+        return
+    print(
+        "[Line] Gaussian-refined confidence @ iter {}: radius {:.6f}, supported {}/{} lines, "
+        "density mean {:.6f}, opacity mean {:.6f}, refine weight min/mean/max {:.4f}/{:.4f}/{:.4f}, "
+        "confidence min/mean/max {:.4f}/{:.4f}/{:.4f}".format(
+            iteration,
+            stats["radius"],
+            stats["supported"],
+            stats["total"],
+            stats["density_mean"],
+            stats["opacity_mean"],
+            stats["weight_min"],
+            stats["weight_mean"],
+            stats["weight_max"],
+            stats["confidence_min"],
+            stats["confidence_mean"],
+            stats["confidence_max"],
+        )
+    )
+
+
 def _select_multiview_cameras(cameras, max_views):
     if max_views is None or max_views <= 0 or len(cameras) <= max_views:
         return cameras
@@ -415,6 +521,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     line_edge_support_active = False
     line_orient_active = False
     line_densify_active = False
+    line_gaussian_refine_active = bool(opt.line_gaussian_refine_enable)
+    line_gaussian_refined = False
     coverage_loss_active = (
         opt.coverage_loss_enable
         and (
@@ -484,6 +592,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     line_confidences.shape[0],
                 )
             )
+        if line_gaussian_refine_active and int(opt.line_gaussian_refine_start_iter) <= first_iter:
+            line_confidences, gaussian_refine_stats = _apply_gaussian_refined_line_confidence(
+                line_segments,
+                line_confidences,
+                gaussians,
+                scene.cameras_extent,
+                opt,
+            )
+            line_gaussian_refined = True
+            _print_gaussian_refine_stats(first_iter, gaussian_refine_stats)
         print(
             "[Line] Final confidence min/mean/max: {:.4f}/{:.4f}/{:.4f}".format(
                 line_confidences.min().item(),
@@ -628,6 +746,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
+
+        if (
+            line_gaussian_refine_active
+            and not line_gaussian_refined
+            and line_segments is not None
+            and iteration >= int(opt.line_gaussian_refine_start_iter)
+        ):
+            line_confidences, gaussian_refine_stats = _apply_gaussian_refined_line_confidence(
+                line_segments,
+                line_confidences,
+                gaussians,
+                scene.cameras_extent,
+                opt,
+            )
+            line_gaussian_refined = True
+            _print_gaussian_refine_stats(iteration, gaussian_refine_stats)
+            if smip_active:
+                gaussians.update_smip_filter_weights(line_segments, line_confidences, pipe)
+            torch.cuda.empty_cache()
 
         # Pick a random Camera
         if not viewpoint_stack:
