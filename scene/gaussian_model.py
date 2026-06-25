@@ -966,7 +966,16 @@ class GaussianModel:
                     area_weight = area_weight.clamp(max=area_max)
                 area_boost = max(float(getattr(line_cfg, "line_densify_pixel_area_boost", 1.0)), 0.0)
                 if area_boost > 0.0:
-                    line_score = line_score * (1.0 + area_boost * area_weight * sig_low_a)
+                    if getattr(line_cfg, "line_densify_pixel_gap_gate_enable", False):
+                        gate_threshold = float(getattr(line_cfg, "line_densify_pixel_gap_gate_threshold", 1.0))
+                        gate_temperature = max(float(getattr(line_cfg, "line_densify_pixel_gap_gate_temperature", 0.25)), 1e-6)
+                        gate_min = min(max(float(getattr(line_cfg, "line_densify_pixel_gap_gate_min", 0.0)), 0.0), 1.0)
+                        gap_gate = torch.sigmoid((nearest_confidence - gate_threshold) / gate_temperature)
+                        if gate_min > 0.0:
+                            gap_gate = gate_min + (1.0 - gate_min) * gap_gate
+                    else:
+                        gap_gate = 1.0
+                    line_score = line_score * (1.0 + area_boost * area_weight * sig_low_a * gap_gate)
         p_clone = line_score * sig_g * sig_a
 
         sig_d = torch.sigmoid((d - tau_d) / s_d)
