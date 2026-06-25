@@ -223,6 +223,11 @@ class OptimizationParams(ParamGroup):
         self.line_densify_confidence_power = 1.0
         self.line_densify_confidence_max = 3.0
         self.line_densify_low_alpha_boost = 0.5
+        self.line_densify_pixel_aware_enable = False
+        self.line_densify_pixel_area_power = 0.5
+        self.line_densify_pixel_area_quantile = 0.7
+        self.line_densify_pixel_area_max = 3.0
+        self.line_densify_pixel_area_boost = 1.0
         self.line_densify_prune_enable = False
         self.line_densify_sigma = 0.0
         self.line_densify_tau_g = 0.0

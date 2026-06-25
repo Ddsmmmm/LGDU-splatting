@@ -952,6 +952,21 @@ class GaussianModel:
         low_alpha_boost = max(float(getattr(line_cfg, "line_densify_low_alpha_boost", 0.0)), 0.0)
         if low_alpha_boost > 0.0:
             line_score = line_score * (1.0 + low_alpha_boost * sig_low_a)
+        if getattr(line_cfg, "line_densify_pixel_aware_enable", False):
+            radii_2d = self.max_radii2D.detach().to(device=line_score.device, dtype=line_score.dtype).clamp_min(0.0)
+            area = radii_2d * radii_2d
+            positive_area = area[area > 0.0]
+            if positive_area.numel() > 0:
+                q = min(max(float(getattr(line_cfg, "line_densify_pixel_area_quantile", 0.7)), 0.0), 1.0)
+                area_scale = torch.quantile(positive_area, q).clamp_min(1.0)
+                area_power = max(float(getattr(line_cfg, "line_densify_pixel_area_power", 0.5)), 0.0)
+                area_weight = (area / area_scale).clamp_min(0.0).pow(area_power)
+                area_max = float(getattr(line_cfg, "line_densify_pixel_area_max", 3.0))
+                if area_max > 0.0:
+                    area_weight = area_weight.clamp(max=area_max)
+                area_boost = max(float(getattr(line_cfg, "line_densify_pixel_area_boost", 1.0)), 0.0)
+                if area_boost > 0.0:
+                    line_score = line_score * (1.0 + area_boost * area_weight * sig_low_a)
         p_clone = line_score * sig_g * sig_a
 
         sig_d = torch.sigmoid((d - tau_d) / s_d)

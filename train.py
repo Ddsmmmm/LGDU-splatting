@@ -696,12 +696,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             opt.line_densify_prune_start_iter = int(0.6 * opt.iterations)
         if line_densify_active:
             print(
-                "[LineDensify] mode={} score_boost={:.3f} sigma={:.5f} confidence_power={:.3f} low_alpha_boost={:.3f}".format(
+                "[LineDensify] mode={} score_boost={:.3f} sigma={:.5f} confidence_power={:.3f} low_alpha_boost={:.3f} "
+                "pixel_aware={} pixel_boost={:.3f} pixel_power={:.3f} pixel_q={:.3f}".format(
                     line_densify_mode,
                     float(opt.line_densify_score_boost),
                     float(opt.line_densify_sigma),
                     float(opt.line_densify_confidence_power),
                     float(opt.line_densify_low_alpha_boost),
+                    bool(opt.line_densify_pixel_aware_enable),
+                    float(opt.line_densify_pixel_area_boost),
+                    float(opt.line_densify_pixel_area_power),
+                    float(opt.line_densify_pixel_area_quantile),
                 )
             )
         if line_unpool_active:
