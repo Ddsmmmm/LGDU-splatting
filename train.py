@@ -83,9 +83,9 @@ def _normalize_by_positive_median(values):
 @torch.no_grad()
 def _apply_gaussian_refined_line_confidence(line_segments, line_confidences, gaussians, scene_extent, opt):
     if line_segments is None or line_segments.numel() == 0:
-        return line_confidences, None
+        return line_confidences, line_confidences, None
     if gaussians.get_xyz.numel() == 0:
-        return line_confidences, None
+        return line_confidences, line_confidences, None
 
     radius = float(opt.line_gaussian_refine_radius)
     if radius <= 0.0:
@@ -122,18 +122,29 @@ def _apply_gaussian_refined_line_confidence(line_segments, line_confidences, gau
     opacity_score = (opacity_mean / opacity_target).clamp_min(0.0)
     density_power = max(float(opt.line_gaussian_refine_density_power), 0.0)
     opacity_power = max(float(opt.line_gaussian_refine_opacity_power), 0.0)
-    refine_weight = density_score.pow(density_power) * opacity_score.pow(opacity_power)
+    reliability_weight = density_score.pow(density_power) * opacity_score.pow(opacity_power)
 
     min_weight = max(float(opt.line_gaussian_refine_min_weight), 0.0)
     max_weight = float(opt.line_gaussian_refine_max_weight)
-    refine_weight = refine_weight.clamp_min(min_weight)
+    reliability_weight = reliability_weight.clamp_min(min_weight)
     if max_weight > 0.0:
-        refine_weight = refine_weight.clamp(max=max_weight)
+        reliability_weight = reliability_weight.clamp(max=max_weight)
 
     blend = min(max(float(opt.line_gaussian_refine_blend), 0.0), 1.0)
-    blended_weight = (1.0 - blend) + blend * refine_weight
-    refined_confidences = line_confidences * blended_weight
-    refined_confidences = _renormalize_positive_confidences(refined_confidences)
+    reliability_blended_weight = (1.0 - blend) + blend * reliability_weight
+    reliability_confidences = line_confidences * reliability_blended_weight
+    reliability_confidences = _renormalize_positive_confidences(reliability_confidences)
+
+    density_gap = torch.exp(-density_score)
+    opacity_temperature = max(0.25 * opacity_target, 1e-6)
+    opacity_gap = torch.sigmoid((opacity_target - opacity_mean) / opacity_temperature)
+    gap_score = density_gap * opacity_gap
+    if max_weight > 1.0:
+        gap_weight = 1.0 + blend * (max_weight - 1.0) * gap_score
+    else:
+        gap_weight = 1.0 + blend * gap_score
+    gap_confidences = line_confidences * gap_weight
+    gap_confidences = _renormalize_positive_confidences(gap_confidences)
 
     valid_support = support_sum > 0.0
     stats = {
@@ -142,14 +153,20 @@ def _apply_gaussian_refined_line_confidence(line_segments, line_confidences, gau
         "total": int(n_lines),
         "density_mean": float(density[valid_support].mean().item()) if valid_support.any() else 0.0,
         "opacity_mean": float(opacity_mean[valid_support].mean().item()) if valid_support.any() else 0.0,
-        "weight_min": float(refine_weight.min().item()) if refine_weight.numel() > 0 else 0.0,
-        "weight_mean": float(refine_weight.mean().item()) if refine_weight.numel() > 0 else 0.0,
-        "weight_max": float(refine_weight.max().item()) if refine_weight.numel() > 0 else 0.0,
-        "confidence_min": float(refined_confidences.min().item()) if refined_confidences.numel() > 0 else 0.0,
-        "confidence_mean": float(refined_confidences.mean().item()) if refined_confidences.numel() > 0 else 0.0,
-        "confidence_max": float(refined_confidences.max().item()) if refined_confidences.numel() > 0 else 0.0,
+        "reliability_weight_min": float(reliability_weight.min().item()) if reliability_weight.numel() > 0 else 0.0,
+        "reliability_weight_mean": float(reliability_weight.mean().item()) if reliability_weight.numel() > 0 else 0.0,
+        "reliability_weight_max": float(reliability_weight.max().item()) if reliability_weight.numel() > 0 else 0.0,
+        "reliability_confidence_min": float(reliability_confidences.min().item()) if reliability_confidences.numel() > 0 else 0.0,
+        "reliability_confidence_mean": float(reliability_confidences.mean().item()) if reliability_confidences.numel() > 0 else 0.0,
+        "reliability_confidence_max": float(reliability_confidences.max().item()) if reliability_confidences.numel() > 0 else 0.0,
+        "gap_weight_min": float(gap_weight.min().item()) if gap_weight.numel() > 0 else 0.0,
+        "gap_weight_mean": float(gap_weight.mean().item()) if gap_weight.numel() > 0 else 0.0,
+        "gap_weight_max": float(gap_weight.max().item()) if gap_weight.numel() > 0 else 0.0,
+        "gap_confidence_min": float(gap_confidences.min().item()) if gap_confidences.numel() > 0 else 0.0,
+        "gap_confidence_mean": float(gap_confidences.mean().item()) if gap_confidences.numel() > 0 else 0.0,
+        "gap_confidence_max": float(gap_confidences.max().item()) if gap_confidences.numel() > 0 else 0.0,
     }
-    return refined_confidences, stats
+    return reliability_confidences, gap_confidences, stats
 
 
 def _print_gaussian_refine_stats(iteration, stats):
@@ -158,20 +175,27 @@ def _print_gaussian_refine_stats(iteration, stats):
         return
     print(
         "[Line] Gaussian-refined confidence @ iter {}: radius {:.6f}, supported {}/{} lines, "
-        "density mean {:.6f}, opacity mean {:.6f}, refine weight min/mean/max {:.4f}/{:.4f}/{:.4f}, "
-        "confidence min/mean/max {:.4f}/{:.4f}/{:.4f}".format(
+        "density mean {:.6f}, opacity mean {:.6f}, "
+        "reliability weight min/mean/max {:.4f}/{:.4f}/{:.4f}, reliability conf min/mean/max {:.4f}/{:.4f}/{:.4f}, "
+        "gap weight min/mean/max {:.4f}/{:.4f}/{:.4f}, gap conf min/mean/max {:.4f}/{:.4f}/{:.4f}".format(
             iteration,
             stats["radius"],
             stats["supported"],
             stats["total"],
             stats["density_mean"],
             stats["opacity_mean"],
-            stats["weight_min"],
-            stats["weight_mean"],
-            stats["weight_max"],
-            stats["confidence_min"],
-            stats["confidence_mean"],
-            stats["confidence_max"],
+            stats["reliability_weight_min"],
+            stats["reliability_weight_mean"],
+            stats["reliability_weight_max"],
+            stats["reliability_confidence_min"],
+            stats["reliability_confidence_mean"],
+            stats["reliability_confidence_max"],
+            stats["gap_weight_min"],
+            stats["gap_weight_mean"],
+            stats["gap_weight_max"],
+            stats["gap_confidence_min"],
+            stats["gap_confidence_mean"],
+            stats["gap_confidence_max"],
         )
     )
 
@@ -510,6 +534,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     line_segments = None
     line_confidences = None
+    line_reliability_confidences = None
+    line_gap_confidences = None
     line_weight_func = None
     line_photo_weight_func = None
     line_image_edge_weight_func = None
@@ -592,8 +618,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     line_confidences.shape[0],
                 )
             )
+        line_reliability_confidences = line_confidences
+        line_gap_confidences = line_confidences
         if line_gaussian_refine_active and int(opt.line_gaussian_refine_start_iter) <= first_iter:
-            line_confidences, gaussian_refine_stats = _apply_gaussian_refined_line_confidence(
+            line_reliability_confidences, line_gap_confidences, gaussian_refine_stats = _apply_gaussian_refined_line_confidence(
                 line_segments,
                 line_confidences,
                 gaussians,
@@ -691,7 +719,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if line_segments is None:
             print("[SMip] Enabled, but no line segments were loaded. Falling back to global Mip-style filtering.")
         else:
-            gaussians.update_smip_filter_weights(line_segments, line_confidences, pipe)
+            gaussians.update_smip_filter_weights(line_segments, line_reliability_confidences, pipe)
             print(
                 "[SMip] Selective Mip enabled. filter_weight min/mean/max: {:.4f}/{:.4f}/{:.4f}; opacity_comp={:.3f}".format(
                     gaussians.mip_filter_weight.min().item(),
@@ -753,7 +781,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             and line_segments is not None
             and iteration >= int(opt.line_gaussian_refine_start_iter)
         ):
-            line_confidences, gaussian_refine_stats = _apply_gaussian_refined_line_confidence(
+            line_reliability_confidences, line_gap_confidences, gaussian_refine_stats = _apply_gaussian_refined_line_confidence(
                 line_segments,
                 line_confidences,
                 gaussians,
@@ -763,7 +791,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             line_gaussian_refined = True
             _print_gaussian_refine_stats(iteration, gaussian_refine_stats)
             if smip_active:
-                gaussians.update_smip_filter_weights(line_segments, line_confidences, pipe)
+                gaussians.update_smip_filter_weights(line_segments, line_reliability_confidences, pipe)
             torch.cuda.empty_cache()
 
         # Pick a random Camera
@@ -843,7 +871,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             opt.coverage_use_line_mask or "line" in str(opt.coverage_mask_mode).lower()
         )
 
-        line_view_confidences = line_confidences
+        line_view_confidences = line_reliability_confidences
         if line_segments is not None and line_edge_support_active and (center_loss_window or photo_loss_window or image_edge_loss_window or orient_loss_window or coverage_needs_line_mask):
             edge_support = projected_line_edge_support(
                 line_segments,
@@ -856,7 +884,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 min_projected_length=opt.line_edge_min_projected_length,
                 line_chunk_size=opt.line_edge_chunk_size,
             )
-            line_view_confidences = line_confidences * edge_support
+            line_view_confidences = line_reliability_confidences * edge_support
             edge_support_mean = edge_support.mean().item()
 
         line_mask = None
@@ -1287,7 +1315,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         size_threshold,
                         radii,
                         line_segments=line_segments if line_densify_active else None,
-                        line_confidences=line_confidences if line_densify_active else None,
+                        line_confidences=line_gap_confidences if line_densify_active else None,
                         line_cfg=opt,
                         iteration=iteration,
                     )
@@ -1301,7 +1329,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             screen_margin=getattr(pipe, "mip_filter_margin", 0.15),
                         )
                         if smip_active and line_segments is not None:
-                            gaussians.update_smip_filter_weights(line_segments, line_confidences, pipe)
+                            gaussians.update_smip_filter_weights(line_segments, line_reliability_confidences, pipe)
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
@@ -1312,7 +1340,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     screen_margin=getattr(pipe, "mip_filter_margin", 0.15),
                 )
                 if smip_active and line_segments is not None:
-                    gaussians.update_smip_filter_weights(line_segments, line_confidences, pipe)
+                    gaussians.update_smip_filter_weights(line_segments, line_reliability_confidences, pipe)
 
             # Optimizer step
             if iteration < opt.iterations:
