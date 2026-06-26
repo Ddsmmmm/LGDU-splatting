@@ -3,6 +3,7 @@
 **Line-Guided Densification and Unpooling for 3D Gaussian Splatting**
 
 LGDU-Splatting is a research fork of [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting). **It studies how reliable 3D line structures from LIMAP can guide Gaussian growth, repair local reconstruction failures, and preserve or even enhance the global rendering quality of 3DGS.**
+
 The current main method is:
 
 ```text
@@ -29,7 +30,6 @@ This makes the method especially useful for 3DGS failure regions such as:
 - white holes on dark surfaces,
 - under-covered structural edges,
 - line-like geometry where vanilla densification is insufficient.
-
 
 The recommended method is the **LGDU Core** configuration. Later modules such as SMip, Gaussian-refined confidence, PixelGap, and gated PixelGap are kept as experimental variants and ablations, but are not the current main method.
 
@@ -128,7 +128,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python train.py \
   --eval \
   --disable_viewer \
   --data_device cpu \
-  --resolution 2 \
+  --resolution <R> \
   --test_iterations -1 \
   --checkpoint_iterations 7000 15000 30000 \
   --densify_max_points_per_stage 0 \
@@ -337,7 +337,7 @@ The average global metrics are computed as an equal-weighted mean over the seven
 ### LGDU vs 3DGS Global Delta
 
 | Scene | Delta PSNR | Delta SSIM | Delta LPIPS |
-|---|---:|---:|---:|---|
+|---|---:|---:|---:|
 | drjohnson | +0.0883 | +0.00109 | -0.00094 |
 | playroom | +0.0133 | +0.00025 | +0.00085 |
 | counter | -0.0172 | +0.00132 | -0.00017 |
@@ -468,8 +468,7 @@ Edge-region metrics are the most aligned with the line-guided design. LGDU achie
 | kitchen | Mip | 16.7310 | 0.99151 | 0.01025 |
 | kitchen | LGDU | 11.4957 | 0.98566 | 0.01993 |
 
-LGDU improves hole-region PSNR and reduces hole-region LPIPS over 3DGS on all seven scenes:
-
+LGDU improves hole-region PSNR and reduces hole-region LPIPS over 3DGS on all seven scenes.
 
 Hole-region metrics are the most stable evidence that LGDU improves vanilla 3DGS. Although Mip-Splatting has the best average hole PSNR/SSIM/LPIPS, LGDU improves hole PSNR and hole LPIPS over 3DGS on all seven scenes, which directly supports its role as a local repair method.
 
@@ -504,7 +503,6 @@ The final 7-scene comparison shows:
 - Mip-Splatting remains a very strong baseline, especially for SSIM/LPIPS and dark/hole-region perceptual metrics.
 - LGDU and Mip-Splatting are complementary: LGDU is strongest as a line-structure-aware local repair method, while Mip-Splatting is strongest as a scale-aware perceptual baseline.
 - SMip, GRef, PixelGap, and gated PixelGap are useful ablations, but LGDU Core is currently the cleanest and most stable paper main line.
-
 
 ```text
 LGDU-Splatting consistently improves vanilla 3DGS in local hole/edge failure regions,
