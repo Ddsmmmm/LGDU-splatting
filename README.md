@@ -33,14 +33,13 @@ This makes the method especially useful for 3DGS failure regions such as:
 
 ## Current Version
 
-Stable branch and tag:
+Current working branch:
 
 ```text
-branch: lgdu-splatting-v1
-tag:    lgdu-splatting-v1.1
+branch: gref-lgdu
 ```
 
-The latest tagged version includes the LGDU-Splatting v1 method and the 2026-06-24 comparison against 3DGS, Mini-Splatting, and Mip-Splatting.
+The recommended method for reporting is the **LGDU Core** configuration, saved in the experiment folders named `*_eval_lgdu_nv6_*`. Later modules such as SMip, Gaussian-refined confidence, PixelGap, and gated PixelGap are kept as experimental variants and ablations, but are not the current main method.
 
 | Component | Status |
 |---|---|
@@ -52,7 +51,7 @@ The latest tagged version includes the LGDU-Splatting v1 method and the 2026-06-
 | Line-guided unpooling | Implemented |
 | Local dark / edge / hole metrics | Implemented |
 | Crop exporter for qualitative comparison | Implemented |
-| 7-scene comparison with Mip-Splatting | Added |
+| 7-scene comparison with Mini-Splatting and Mip-Splatting | Added |
 
 ## Repository Layout
 
@@ -124,7 +123,7 @@ Important: `-c` / `--config_file` is for a YAML config file. Use `--output_dir` 
 
 ## Train LGDU-Splatting
 
-This is the current recommended LGDU-Splatting v1 configuration:
+This is the current recommended **LGDU Core** configuration:
 
 ```bash
 conda activate 3DGS
@@ -275,20 +274,20 @@ Whole-image averages can dilute structural improvements. For line-guided methods
 
 ## Experiment Summary
 
-The following results summarize the 2026-06-24 fair comparison. All methods use the same scene, split, resolution, and 30k iteration evaluation for each scene.
+The following results summarize the final 7-scene comparison collected from `/home/ddsm/files/final_metrics`. All methods use the same scene, split, resolution, and 30k iteration evaluation for each scene.
 
 ```text
 3DGS: vanilla 3D Gaussian Splatting
 Mini: Mini-Splatting
 Mip : Mip-Splatting
-LGDU: LGDU-Splatting v1.1
+LGDU: LGDU Core, the current main method
 ```
 
 Detailed reports used to update this README:
 
 ```text
-/home/ddsm/files/train/global_comparison_2026-06-24.md
-/home/ddsm/files/train/local_region_comparison_2026-06-24.md
+/home/ddsm/files/final_metrics/*_global.txt
+/home/ddsm/files/final_metrics/*_region.txt
 ```
 
 ### Global Metrics
@@ -344,6 +343,95 @@ Global metric best-count summary:
 | truck | -0.1058 | -0.00014 | -0.00138 | LPIPS improves, PSNR/SSIM slightly decrease |
 | kitchen | +0.1816 | +0.00070 | -0.00071 | PSNR/SSIM/LPIPS improve |
 
+### Average Local Metrics
+
+| Region | Method | PSNR | SSIM | LPIPS |
+|---|---|---:|---:|---:|
+| dark | 3DGS | 29.7747 | 0.96641 | 0.03999 |
+| dark | Mini | 29.2251 | 0.96218 | 0.04726 |
+| dark | Mip | 29.7202 | **0.96673** | **0.03864** |
+| dark | LGDU | **29.8735** | 0.96647 | 0.03976 |
+| edge | 3DGS | 26.2113 | 0.95859 | 0.04719 |
+| edge | Mini | 25.5450 | 0.95220 | 0.05980 |
+| edge | Mip | 26.2307 | **0.95870** | 0.04797 |
+| edge | LGDU | **26.2472** | 0.95865 | **0.04680** |
+| hole | 3DGS | 12.1176 | 0.98401 | 0.01857 |
+| hole | Mini | 13.9288 | 0.98733 | 0.01455 |
+| hole | Mip | **14.0827** | **0.98742** | **0.01397** |
+| hole | LGDU | 13.5260 | 0.98648 | 0.01526 |
+
+These averages show the method's positioning. LGDU is strongest on structure-related local repair: it has the best average edge PSNR/LPIPS and clearly improves hole regions over 3DGS. Mip-Splatting remains the strongest perceptual baseline, especially for dark and hole LPIPS.
+
+### Dark-Region Metrics
+
+| Scene | Method | Dark PSNR | Dark SSIM | Dark LPIPS |
+|---|---|---:|---:|---:|
+| drjohnson | 3DGS | 29.7285 | 0.94739 | 0.07443 |
+| drjohnson | Mini | 29.9491 | 0.94644 | 0.08589 |
+| drjohnson | Mip | 29.1437 | 0.94542 | 0.07545 |
+| drjohnson | LGDU | 29.7859 | 0.94712 | 0.07443 |
+| playroom | 3DGS | 28.6304 | 0.97302 | 0.03853 |
+| playroom | Mini | 28.9064 | 0.97367 | 0.04162 |
+| playroom | Mip | 28.6645 | 0.97316 | 0.03774 |
+| playroom | LGDU | 28.7072 | 0.97328 | 0.03822 |
+| counter | 3DGS | 33.3057 | 0.96921 | 0.03599 |
+| counter | Mini | 32.1873 | 0.96029 | 0.04514 |
+| counter | Mip | 33.3512 | 0.97012 | 0.03356 |
+| counter | LGDU | 33.2867 | 0.96925 | 0.03606 |
+| room | 3DGS | 34.7479 | 0.97860 | 0.02648 |
+| room | Mini | 33.2663 | 0.97344 | 0.03243 |
+| room | Mip | 34.4109 | 0.97915 | 0.02453 |
+| room | LGDU | 35.0214 | 0.97912 | 0.02627 |
+| train | 3DGS | 24.7468 | 0.94041 | 0.05301 |
+| train | Mini | 24.0282 | 0.92939 | 0.06689 |
+| train | Mip | 24.7701 | 0.94126 | 0.05196 |
+| train | LGDU | 24.8376 | 0.93973 | 0.05269 |
+| truck | 3DGS | 25.9667 | 0.96778 | 0.03420 |
+| truck | Mini | 25.6175 | 0.96570 | 0.03856 |
+| truck | Mip | 25.8532 | 0.96856 | 0.03143 |
+| truck | LGDU | 25.9449 | 0.96789 | 0.03392 |
+| kitchen | 3DGS | 31.2971 | 0.98848 | 0.01730 |
+| kitchen | Mini | 30.6207 | 0.98633 | 0.02028 |
+| kitchen | Mip | 31.8479 | 0.98942 | 0.01581 |
+| kitchen | LGDU | 31.5306 | 0.98888 | 0.01670 |
+
+Dark-region metrics are included because many visible 3DGS holes appear as bright artifacts on dark surfaces. LGDU usually preserves or slightly improves dark-region quality over 3DGS, but Mip-Splatting is stronger on dark-region SSIM/LPIPS. Dark quality is therefore supporting evidence, not the main contribution.
+
+### Edge-Region Metrics
+
+| Scene | Method | Edge PSNR | Edge SSIM | Edge LPIPS |
+|---|---|---:|---:|---:|
+| drjohnson | 3DGS | 26.3984 | 0.95084 | 0.06109 |
+| drjohnson | Mini | 26.5077 | 0.94983 | 0.07213 |
+| drjohnson | Mip | 25.8528 | 0.94623 | 0.06783 |
+| drjohnson | LGDU | 26.4778 | 0.95135 | 0.06002 |
+| playroom | 3DGS | 27.2588 | 0.95791 | 0.05883 |
+| playroom | Mini | 27.1588 | 0.95863 | 0.06377 |
+| playroom | Mip | 27.3251 | 0.95817 | 0.05887 |
+| playroom | LGDU | 27.2719 | 0.95829 | 0.05769 |
+| counter | 3DGS | 27.1027 | 0.97114 | 0.02897 |
+| counter | Mini | 25.9545 | 0.96187 | 0.03978 |
+| counter | Mip | 27.1337 | 0.97153 | 0.02861 |
+| counter | LGDU | 27.0554 | 0.97114 | 0.02903 |
+| room | 3DGS | 30.3188 | 0.98285 | 0.02380 |
+| room | Mini | 29.0925 | 0.97704 | 0.03205 |
+| room | Mip | 30.5314 | 0.98195 | 0.02447 |
+| room | LGDU | 30.4036 | 0.98289 | 0.02381 |
+| train | 3DGS | 20.8965 | 0.92633 | 0.07831 |
+| train | Mini | 20.1736 | 0.91095 | 0.10450 |
+| train | Mip | 21.0498 | 0.92894 | 0.07780 |
+| train | LGDU | 20.9221 | 0.92566 | 0.07820 |
+| truck | 3DGS | 21.6481 | 0.94197 | 0.05014 |
+| truck | Mini | 21.2236 | 0.93463 | 0.06725 |
+| truck | Mip | 21.9659 | 0.94563 | 0.04740 |
+| truck | LGDU | 21.5961 | 0.94172 | 0.05001 |
+| kitchen | 3DGS | 29.8555 | 0.97909 | 0.02919 |
+| kitchen | Mini | 28.7045 | 0.97244 | 0.03910 |
+| kitchen | Mip | 29.7559 | 0.97846 | 0.03084 |
+| kitchen | LGDU | 30.0036 | 0.97950 | 0.02882 |
+
+Edge-region metrics are the most aligned with the line-guided design. LGDU achieves the best average edge PSNR and edge LPIPS, showing that line-guided densification and unpooling improve reconstruction around structural edges rather than only filling isolated holes.
+
 ### Hole-Region Metrics
 
 | Scene | Method | Hole PSNR | Hole SSIM | Hole LPIPS |
@@ -389,6 +477,8 @@ truck    : +0.4092
 kitchen  : +1.6376
 ```
 
+Hole-region metrics are the most stable evidence that LGDU improves vanilla 3DGS. Although Mip-Splatting has the best average hole PSNR/SSIM/LPIPS, LGDU improves hole PSNR and hole LPIPS over 3DGS on all seven scenes, which directly supports its role as a local repair method.
+
 ### Local Region Findings
 
 | Scene | Main local observation |
@@ -403,14 +493,14 @@ kitchen  : +1.6376
 
 ## Current Conclusion
 
-LGDU-Splatting is best understood as a structure-guided improvement to vanilla 3DGS:
+LGDU-Splatting is best understood as a structure-guided improvement to vanilla 3DGS. The current main line is **LGDU Core**:
 
 ```text
 It preserves or improves whole-image 3DGS quality on most scenes,
 and consistently improves local hole-region quality over 3DGS.
 ```
 
-The 2026-06-24 comparison shows:
+The final 7-scene comparison shows:
 
 - LGDU improves PSNR over 3DGS on 5/7 scenes.
 - LGDU improves LPIPS over 3DGS on 6/7 scenes.
@@ -418,6 +508,7 @@ The 2026-06-24 comparison shows:
 - LGDU obtains the most PSNR wins among the four methods.
 - Mip-Splatting remains a very strong baseline, especially for SSIM/LPIPS and dark/hole-region perceptual metrics.
 - LGDU and Mip-Splatting are complementary: LGDU is strongest as a line-structure-aware local repair method, while Mip-Splatting is strongest as a scale-aware perceptual baseline.
+- SMip, GRef, PixelGap, and gated PixelGap are useful ablations, but LGDU Core is currently the cleanest and most stable paper main line.
 
 
 
@@ -432,7 +523,7 @@ Mip-Splatting, whose scale-aware filtering remains strong for perceptual metrics
 This local fork uses:
 
 ```text
-origin   git@github.com:Ddsmmmm/LineSplat.git
+origin   git@github.com:Ddsmmmm/LGDU-splatting.git
 upstream https://github.com/graphdeco-inria/gaussian-splatting.git
 ```
 
