@@ -231,7 +231,7 @@ class OptimizationParams(ParamGroup):
         self.line_densify_pixel_gap_gate_enable = False
         self.line_densify_pixel_gap_gate_threshold = 1.0
         self.line_densify_pixel_gap_gate_temperature = 0.25
-        self.line_densify_pixel_gap_gate_min = 0.0
+        self.line_densify_pixel_gap_gate_min = 0.3
         self.line_densify_prune_enable = False
         self.line_densify_sigma = 0.0
         self.line_densify_tau_g = 0.0

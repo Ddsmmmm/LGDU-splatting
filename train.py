@@ -698,7 +698,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             print(
                 "[LineDensify] mode={} score_boost={:.3f} sigma={:.5f} confidence_power={:.3f} low_alpha_boost={:.3f} "
                 "pixel_aware={} pixel_boost={:.3f} pixel_power={:.3f} pixel_q={:.3f} "
-                "gap_gate={} gap_thr={:.3f} gap_temp={:.3f}".format(
+                "gap_gate={} gap_thr={:.3f} gap_temp={:.3f} gap_min={:.3f}".format(
                     line_densify_mode,
                     float(opt.line_densify_score_boost),
                     float(opt.line_densify_sigma),
@@ -711,6 +711,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     bool(opt.line_densify_pixel_gap_gate_enable),
                     float(opt.line_densify_pixel_gap_gate_threshold),
                     float(opt.line_densify_pixel_gap_gate_temperature),
+                    float(opt.line_densify_pixel_gap_gate_min),
                 )
             )
         if line_unpool_active:
