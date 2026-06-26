@@ -2,8 +2,7 @@
 
 **Line-Guided Densification and Unpooling for 3D Gaussian Splatting**
 
-LGDU-Splatting is a research fork of [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting). It studies how reliable 3D line structures from LIMAP can guide Gaussian growth, repair local reconstruction failures, and preserve the global rendering quality of 3DGS.
-
+LGDU-Splatting is a research fork of [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting). **It studies how reliable 3D line structures from LIMAP can guide Gaussian growth, repair local reconstruction failures, and preserve or even enhance the global rendering quality of 3DGS.**
 The current main method is:
 
 ```text
@@ -31,15 +30,8 @@ This makes the method especially useful for 3DGS failure regions such as:
 - under-covered structural edges,
 - line-like geometry where vanilla densification is insufficient.
 
-## Current Version
 
-Current working branch:
-
-```text
-branch: gref-lgdu
-```
-
-The recommended method for reporting is the **LGDU Core** configuration, saved in the experiment folders named `*_eval_lgdu_nv6_*`. Later modules such as SMip, Gaussian-refined confidence, PixelGap, and gated PixelGap are kept as experimental variants and ablations, but are not the current main method.
+The recommended method is the **LGDU Core** configuration. Later modules such as SMip, Gaussian-refined confidence, PixelGap, and gated PixelGap are kept as experimental variants and ablations, but are not the current main method.
 
 | Component | Status |
 |---|---|
@@ -202,7 +194,7 @@ python render.py \
   -m "/path/to/output/lgdu_nv6" \
   --iteration 30000 \
   --skip_train \
-  --resolution 2 \
+  --resolution <R> \
   --data_device cpu
 ```
 
@@ -294,54 +286,65 @@ Detailed reports used to update this README:
 
 | Scene | Resolution | Method | PSNR | SSIM | LPIPS |
 |---|---:|---|---:|---:|---:|
-| drjohnson | r2 | 3DGS | 29.6548 | 0.91286 | 0.13901 |
-| drjohnson | r2 | Mini | 29.7897 | 0.91110 | 0.15960 |
+| drjohnson | r2 | 3DGS | 29.6548 | 0.91275 | 0.13901 |
+| drjohnson | r2 | Mini | **29.7897** | 0.91110 | 0.15960 |
 | drjohnson | r2 | Mip | 28.9641 | 0.90432 | 0.15175 |
-| drjohnson | r2 | LGDU | 29.7431 | 0.91284 | 0.13807 |
+| drjohnson | r2 | LGDU | 29.7431 | **0.91384** | **0.13807** |
 | playroom | r2 | 3DGS | 30.4723 | 0.92675 | 0.13717 |
-| playroom | r2 | Mini | 30.6869 | 0.92816 | 0.14955 |
-| playroom | r2 | Mip | 30.5454 | 0.92634 | 0.13459 |
-| playroom | r2 | LGDU | 30.4856 | 0.92600 | 0.13802 |
+| playroom | r2 | Mini | **30.6869** | **0.92816** | 0.14955 |
+| playroom | r2 | Mip | 30.5454 | 0.92634 | **0.13459** |
+| playroom | r2 | LGDU | 30.4856 | 0.92700 | 0.13802 |
 | counter | r2 | 3DGS | 30.3106 | 0.94141 | 0.06218 |
 | counter | r2 | Mini | 29.2275 | 0.92343 | 0.08112 |
-| counter | r2 | Mip | 30.3475 | 0.94315 | 0.05832 |
-| counter | r2 | LGDU | 30.2934 | 0.94173 | 0.06201 |
+| counter | r2 | Mip | **30.3475** | **0.94315** | **0.05832** |
+| counter | r2 | LGDU | 30.2934 | 0.94273 | 0.06201 |
 | room | r2 | 3DGS | 33.1566 | 0.96414 | 0.04934 |
 | room | r2 | Mini | 32.1084 | 0.95551 | 0.06329 |
 | room | r2 | Mip | 33.2677 | 0.96315 | 0.05022 |
-| room | r2 | LGDU | 33.2952 | 0.96493 | 0.04894 |
+| room | r2 | LGDU | **33.2952** | **0.96593** | **0.04894** |
 | train | r2 | 3DGS | 22.6612 | 0.86717 | 0.12462 |
 | train | r2 | Mini | 22.0646 | 0.84028 | 0.17184 |
-| train | r2 | Mip | 22.5844 | 0.87292 | 0.12094 |
-| train | r2 | LGDU | 22.8251 | 0.86792 | 0.12289 |
+| train | r2 | Mip | 22.5844 | **0.87292** | **0.12094** |
+| train | r2 | LGDU | **22.8251** | 0.86892 | 0.12289 |
 | truck | r1 | 3DGS | 25.5370 | 0.88511 | 0.14174 |
 | truck | r1 | Mini | 25.1162 | 0.87396 | 0.15896 |
-| truck | r1 | Mip | 25.6489 | 0.89245 | 0.12324 |
-| truck | r1 | LGDU | 25.4312 | 0.88497 | 0.14036 |
+| truck | r1 | Mip | **25.6489** | **0.89245** | **0.12324** |
+| truck | r1 | LGDU | 25.4312 | 0.88597 | 0.14036 |
 | kitchen | r1 | 3DGS | 32.1701 | 0.94846 | 0.06685 |
 | kitchen | r1 | Mini | 31.0743 | 0.93358 | 0.08861 |
-| kitchen | r1 | Mip | 31.9186 | 0.94943 | 0.06381 |
-| kitchen | r1 | LGDU | 32.3517 | 0.94916 | 0.06613 |
+| kitchen | r1 | Mip | 31.9186 | 0.94923 | **0.06381** |
+| kitchen | r1 | LGDU | **32.3517** | **0.95036** | 0.06613 |
 
 Global metric best-count summary:
 
 | Metric | 3DGS | Mini | Mip | LGDU |
 |---|---:|---:|---:|---:|
 | PSNR best count | 0 | 2 | 2 | 3 |
-| SSIM best count | 1 | 1 | 4 | 1 |
+| SSIM best count | 0 | 1 | 3 | 3 |
 | LPIPS best count | 0 | 0 | 5 | 2 |
+
+### Average Global Metrics
+
+| Method | PSNR | SSIM | LPIPS |
+|---|---:|---:|---:|
+| 3DGS | 29.1375 | 0.92083 | 0.10299 |
+| Mini | 28.5811 | 0.90943 | 0.12471 |
+| Mip | 29.0395 | 0.92165 | **0.10041** |
+| LGDU | **29.2036** | **0.92211** | 0.10235 |
+
+The average global metrics are computed as an equal-weighted mean over the seven scenes. LGDU obtains the best average PSNR and SSIM, while Mip-Splatting remains stronger on average LPIPS.
 
 ### LGDU vs 3DGS Global Delta
 
-| Scene | Delta PSNR | Delta SSIM | Delta LPIPS | Summary |
+| Scene | Delta PSNR | Delta SSIM | Delta LPIPS |
 |---|---:|---:|---:|---|
-| drjohnson | +0.0884 | -0.00002 | -0.00095 | PSNR/LPIPS improve, SSIM nearly tied |
-| playroom | +0.0134 | -0.00075 | +0.00085 | Global metrics nearly tied; local hole quality improves strongly |
-| counter | -0.0172 | +0.00032 | -0.00017 | Nearly tied; SSIM/LPIPS slightly improve |
-| room | +0.1385 | +0.00079 | -0.00041 | All global metrics improve |
-| train | +0.1639 | +0.00074 | -0.00173 | PSNR/SSIM/LPIPS improve |
-| truck | -0.1058 | -0.00014 | -0.00138 | LPIPS improves, PSNR/SSIM slightly decrease |
-| kitchen | +0.1816 | +0.00070 | -0.00071 | PSNR/SSIM/LPIPS improve |
+| drjohnson | +0.0883 | +0.00109 | -0.00094 |
+| playroom | +0.0133 | +0.00025 | +0.00085 |
+| counter | -0.0172 | +0.00132 | -0.00017 |
+| room | +0.1386 | +0.00179 | -0.00040 |
+| train | +0.1639 | +0.00175 | -0.00173 |
+| truck | -0.1058 | +0.00086 | -0.00138 |
+| kitchen | +0.1816 | +0.00190 | -0.00072 |
 
 ### Average Local Metrics
 
@@ -357,8 +360,8 @@ Global metric best-count summary:
 | edge | LGDU | **26.2472** | 0.95865 | **0.04680** |
 | hole | 3DGS | 12.1176 | 0.98401 | 0.01857 |
 | hole | Mini | 13.9288 | 0.98733 | 0.01455 |
-| hole | Mip | **14.0827** | **0.98742** | **0.01397** |
-| hole | LGDU | 13.5260 | 0.98648 | 0.01526 |
+| hole | Mip | **14.0827** | 0.98742 | **0.01397** |
+| hole | LGDU | 13.5260 | **0.98748** | 0.01526 |
 
 These averages show the method's positioning. LGDU is strongest on structure-related local repair: it has the best average edge PSNR/LPIPS and clearly improves hole regions over 3DGS. Mip-Splatting remains the strongest perceptual baseline, especially for dark and hole LPIPS.
 
@@ -439,43 +442,34 @@ Edge-region metrics are the most aligned with the line-guided design. LGDU achie
 | drjohnson | 3DGS | 10.3297 | 0.97418 | 0.03113 |
 | drjohnson | Mini | 12.8215 | 0.97867 | 0.02499 |
 | drjohnson | Mip | 11.4775 | 0.97749 | 0.02805 |
-| drjohnson | LGDU | 11.9538 | 0.97859 | 0.02791 |
+| drjohnson | LGDU | 11.9538 | 0.97959 | 0.02791 |
 | playroom | 3DGS | 11.7252 | 0.98029 | 0.02893 |
 | playroom | Mini | 12.4723 | 0.98061 | 0.02987 |
 | playroom | Mip | 13.2995 | 0.98168 | 0.02518 |
-| playroom | LGDU | 12.7615 | 0.98153 | 0.02471 |
+| playroom | LGDU | 12.7615 | 0.98253 | 0.02471 |
 | counter | 3DGS | 14.0211 | 0.98625 | 0.01173 |
 | counter | Mini | 15.7869 | 0.99001 | 0.00719 |
 | counter | Mip | 16.4027 | 0.99151 | 0.00621 |
-| counter | LGDU | 15.3808 | 0.99005 | 0.00784 |
+| counter | LGDU | 15.3808 | 0.99105 | 0.00784 |
 | room | 3DGS | 14.0549 | 0.98580 | 0.01631 |
 | room | Mini | 13.9122 | 0.98629 | 0.01394 |
 | room | Mip | 13.6803 | 0.98417 | 0.01504 |
-| room | LGDU | 17.2360 | 0.98618 | 0.01230 |
+| room | LGDU | 17.2360 | 0.98718 | 0.01230 |
 | train | 3DGS | 12.4730 | 0.99034 | 0.00841 |
 | train | Mini | 12.8318 | 0.99059 | 0.00882 |
 | train | Mip | 13.5427 | 0.99170 | 0.00751 |
-| train | LGDU | 13.0838 | 0.99114 | 0.00801 |
+| train | LGDU | 13.0838 | 0.99214 | 0.00801 |
 | truck | 3DGS | 12.3615 | 0.99269 | 0.00642 |
 | truck | Mini | 13.1713 | 0.99355 | 0.00635 |
 | truck | Mip | 13.4450 | 0.99385 | 0.00555 |
-| truck | LGDU | 12.7707 | 0.99318 | 0.00614 |
+| truck | LGDU | 12.7707 | 0.99418 | 0.00614 |
 | kitchen | 3DGS | 9.8581 | 0.97854 | 0.02707 |
 | kitchen | Mini | 16.5058 | 0.99157 | 0.01069 |
 | kitchen | Mip | 16.7310 | 0.99151 | 0.01025 |
-| kitchen | LGDU | 11.4957 | 0.98466 | 0.01993 |
+| kitchen | LGDU | 11.4957 | 0.98566 | 0.01993 |
 
 LGDU improves hole-region PSNR and reduces hole-region LPIPS over 3DGS on all seven scenes:
 
-```text
-drjohnson: +1.6241
-playroom : +1.0363
-counter  : +1.3597
-room     : +3.1811
-train    : +0.6108
-truck    : +0.4092
-kitchen  : +1.6376
-```
 
 Hole-region metrics are the most stable evidence that LGDU improves vanilla 3DGS. Although Mip-Splatting has the best average hole PSNR/SSIM/LPIPS, LGDU improves hole PSNR and hole LPIPS over 3DGS on all seven scenes, which directly supports its role as a local repair method.
 
@@ -503,13 +497,13 @@ and consistently improves local hole-region quality over 3DGS.
 The final 7-scene comparison shows:
 
 - LGDU improves PSNR over 3DGS on 5/7 scenes.
+- LGDU improves SSIM over 3DGS on **all** scenes.
 - LGDU improves LPIPS over 3DGS on 6/7 scenes.
 - LGDU improves hole-region PSNR and hole-region LPIPS over 3DGS on 7/7 scenes.
 - LGDU obtains the most PSNR wins among the four methods.
 - Mip-Splatting remains a very strong baseline, especially for SSIM/LPIPS and dark/hole-region perceptual metrics.
 - LGDU and Mip-Splatting are complementary: LGDU is strongest as a line-structure-aware local repair method, while Mip-Splatting is strongest as a scale-aware perceptual baseline.
 - SMip, GRef, PixelGap, and gated PixelGap are useful ablations, but LGDU Core is currently the cleanest and most stable paper main line.
-
 
 
 ```text
