@@ -33,14 +33,13 @@ This makes the method especially useful for 3DGS failure regions such as:
 
 ## Current Version
 
-Stable branch and tag:
+Current working branch:
 
 ```text
-branch: lgdu-splatting-v1
-tag:    lgdu-splatting-v1.1
+branch: gref-lgdu
 ```
 
-The latest tagged version includes the LGDU-Splatting v1 method and the 2026-06-24 comparison against 3DGS, Mini-Splatting, and Mip-Splatting.
+The recommended method for reporting is the **LGDU Core** configuration, saved in the experiment folders named `*_eval_lgdu_nv6_*`. Later modules such as SMip, Gaussian-refined confidence, PixelGap, and gated PixelGap are kept as experimental variants and ablations, but are not the current main method.
 
 | Component | Status |
 |---|---|
@@ -52,7 +51,7 @@ The latest tagged version includes the LGDU-Splatting v1 method and the 2026-06-
 | Line-guided unpooling | Implemented |
 | Local dark / edge / hole metrics | Implemented |
 | Crop exporter for qualitative comparison | Implemented |
-| 7-scene comparison with Mip-Splatting | Added |
+| 7-scene comparison with Mini-Splatting and Mip-Splatting | Added |
 
 ## Repository Layout
 
@@ -124,7 +123,7 @@ Important: `-c` / `--config_file` is for a YAML config file. Use `--output_dir` 
 
 ## Train LGDU-Splatting
 
-This is the current recommended LGDU-Splatting v1 configuration:
+This is the current recommended **LGDU Core** configuration:
 
 ```bash
 conda activate 3DGS
@@ -275,20 +274,20 @@ Whole-image averages can dilute structural improvements. For line-guided methods
 
 ## Experiment Summary
 
-The following results summarize the 2026-06-24 fair comparison. All methods use the same scene, split, resolution, and 30k iteration evaluation for each scene.
+The following results summarize the final 7-scene comparison collected from `/home/ddsm/files/final_metrics`. All methods use the same scene, split, resolution, and 30k iteration evaluation for each scene.
 
 ```text
 3DGS: vanilla 3D Gaussian Splatting
 Mini: Mini-Splatting
 Mip : Mip-Splatting
-LGDU: LGDU-Splatting v1.1
+LGDU: LGDU Core, the current main method
 ```
 
 Detailed reports used to update this README:
 
 ```text
-/home/ddsm/files/train/global_comparison_2026-06-24.md
-/home/ddsm/files/train/local_region_comparison_2026-06-24.md
+/home/ddsm/files/final_metrics/*_global.txt
+/home/ddsm/files/final_metrics/*_region.txt
 ```
 
 ### Global Metrics
@@ -403,14 +402,14 @@ kitchen  : +1.6376
 
 ## Current Conclusion
 
-LGDU-Splatting is best understood as a structure-guided improvement to vanilla 3DGS:
+LGDU-Splatting is best understood as a structure-guided improvement to vanilla 3DGS. The current main line is **LGDU Core**:
 
 ```text
 It preserves or improves whole-image 3DGS quality on most scenes,
 and consistently improves local hole-region quality over 3DGS.
 ```
 
-The 2026-06-24 comparison shows:
+The final 7-scene comparison shows:
 
 - LGDU improves PSNR over 3DGS on 5/7 scenes.
 - LGDU improves LPIPS over 3DGS on 6/7 scenes.
@@ -418,6 +417,7 @@ The 2026-06-24 comparison shows:
 - LGDU obtains the most PSNR wins among the four methods.
 - Mip-Splatting remains a very strong baseline, especially for SSIM/LPIPS and dark/hole-region perceptual metrics.
 - LGDU and Mip-Splatting are complementary: LGDU is strongest as a line-structure-aware local repair method, while Mip-Splatting is strongest as a scale-aware perceptual baseline.
+- SMip, GRef, PixelGap, and gated PixelGap are useful ablations, but LGDU Core is currently the cleanest and most stable paper main line.
 
 
 
@@ -432,7 +432,7 @@ Mip-Splatting, whose scale-aware filtering remains strong for perceptual metrics
 This local fork uses:
 
 ```text
-origin   git@github.com:Ddsmmmm/LineSplat.git
+origin   git@github.com:Ddsmmmm/LGDU-splatting.git
 upstream https://github.com/graphdeco-inria/gaussian-splatting.git
 ```
 
