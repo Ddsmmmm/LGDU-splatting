@@ -165,6 +165,37 @@ def _projected_line_photometric_loss(render_image, gt_image, line_mask, eps):
     return (line_mask * per_pixel).sum() / mask_sum.clamp_min(1e-8)
 
 
+@torch.no_grad()
+def _build_residual_score_map(render_image, gt_image, opt):
+    error = (render_image.detach() - gt_image.detach()).abs().mean(dim=0).clamp_min(0.0)
+    values = error.reshape(-1)
+    positive = values[values > 0.0]
+    if positive.numel() <= 0:
+        return torch.zeros_like(error)
+
+    low_q = min(max(float(opt.line_residual_percentile), 0.0), 100.0) / 100.0
+    high_q = min(max(float(opt.line_residual_high_percentile), 0.0), 100.0) / 100.0
+    high_q = max(high_q, low_q)
+    low = torch.quantile(positive, low_q)
+    high = torch.quantile(positive, high_q)
+    denom = (high - low).clamp_min(1e-6)
+    score = ((error - low) / denom).clamp(0.0, 1.0)
+
+    min_score = max(float(opt.line_residual_min_score), 0.0)
+    if min_score > 0.0:
+        score = torch.where(score >= min_score, score, torch.zeros_like(score))
+
+    power = max(float(opt.line_residual_power), 0.0)
+    if power != 1.0:
+        score = score.clamp_min(0.0).pow(power)
+
+    dilation_px = max(int(opt.line_residual_dilation_px), 0)
+    if dilation_px > 0:
+        kernel_size = 2 * dilation_px + 1
+        score = F.max_pool2d(score[None, None], kernel_size=kernel_size, stride=1, padding=dilation_px)[0, 0]
+    return score.clamp(0.0, 1.0)
+
+
 class _CoverageCamera:
     pass
 
@@ -403,6 +434,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     line_edge_support_active = False
     line_orient_active = False
     line_densify_active = False
+    line_residual_active = False
     coverage_loss_active = (
         opt.coverage_loss_enable
         and (
@@ -534,6 +566,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             raise ValueError(f"Unknown line_densify_mode: {opt.line_densify_mode}")
         line_unpool_active = opt.line_unpool_enable
         line_densify_active = opt.line_densify_enable and (line_densify_mode != "off" or line_unpool_active)
+        line_residual_active = bool(opt.line_residual_enable) and line_densify_active
         if opt.line_densify_enable and opt.line_densify_prune_start_iter <= 0:
             opt.line_densify_prune_start_iter = int(0.6 * opt.iterations)
         if line_densify_active:
@@ -544,6 +577,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     float(opt.line_densify_sigma),
                     float(opt.line_densify_confidence_power),
                     float(opt.line_densify_low_alpha_boost),
+                )
+            )
+        if line_residual_active:
+            print(
+                "[LineResidual] percentile={:.1f}/{:.1f} boost={:.3f} power={:.3f} dilation={} window=[{}, {}]".format(
+                    float(opt.line_residual_percentile),
+                    float(opt.line_residual_high_percentile),
+                    float(opt.line_residual_boost),
+                    float(opt.line_residual_power),
+                    int(opt.line_residual_dilation_px),
+                    int(opt.line_residual_start_iter),
+                    int(opt.line_residual_end_iter),
                 )
             )
         if line_unpool_active:
@@ -1117,6 +1162,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                    residual_score_map = None
+                    residual_camera = None
+                    residual_window = (
+                        line_residual_active
+                        and iteration >= int(opt.line_residual_start_iter)
+                        and (int(opt.line_residual_end_iter) <= 0 or iteration <= int(opt.line_residual_end_iter))
+                    )
+                    if residual_window:
+                        residual_score_map = _build_residual_score_map(image, gt_image, opt)
+                        residual_camera = viewpoint_cam
                     gaussians.densify_and_prune(
                         opt.densify_grad_threshold,
                         0.005,
@@ -1127,6 +1182,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         line_confidences=line_confidences if line_densify_active else None,
                         line_cfg=opt,
                         iteration=iteration,
+                        residual_score_map=residual_score_map,
+                        residual_camera=residual_camera,
                     )
                     line_unpool_count = getattr(gaussians, "_last_line_unpool_count", 0)
                     if line_unpool_count > 0:

@@ -215,6 +215,15 @@ class OptimizationParams(ParamGroup):
         self.line_densify_prune_end_iter = 0
         self.line_densify_chunk_size = 256
         self.line_densify_point_chunk_size = 4096
+        self.line_residual_enable = False
+        self.line_residual_start_iter = 3000
+        self.line_residual_end_iter = 15000
+        self.line_residual_percentile = 70.0
+        self.line_residual_high_percentile = 95.0
+        self.line_residual_boost = 1.0
+        self.line_residual_power = 1.0
+        self.line_residual_dilation_px = 1
+        self.line_residual_min_score = 0.0
         self.line_unpool_enable = False
         self.line_unpool_start_iter = 0
         self.line_unpool_end_iter = 0

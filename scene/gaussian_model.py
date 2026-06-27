@@ -11,6 +11,7 @@
 
 import torch
 import numpy as np
+import math
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
 from torch import nn
 import os
@@ -515,7 +516,69 @@ class GaussianModel:
 
         return nearest_distances, nearest_indices
 
-    def line_guided_unpool(self, line_segments, line_confidences, line_cfg, scene_extent):
+    @torch.no_grad()
+    def _sample_residual_scores_for_points(self, points, residual_score_map, residual_camera, chunk_size=65536):
+        if residual_score_map is None or residual_camera is None or points is None or points.numel() == 0:
+            return None
+
+        score_map = residual_score_map.detach()
+        if score_map.dim() == 3:
+            score_map = score_map.squeeze(0)
+        if score_map.dim() != 2:
+            return None
+
+        device = points.device
+        dtype = points.dtype
+        score_map = score_map.to(device=device, dtype=torch.float32)
+        height, width = score_map.shape
+        if height <= 0 or width <= 0:
+            return None
+
+        R = torch.as_tensor(residual_camera.R, device=device, dtype=dtype)
+        T = torch.as_tensor(residual_camera.T, device=device, dtype=dtype)
+        focal_x = width / (2.0 * math.tan(float(residual_camera.FoVx) * 0.5))
+        focal_y = height / (2.0 * math.tan(float(residual_camera.FoVy) * 0.5))
+        znear = max(float(getattr(residual_camera, "znear", 0.01)), 1e-4)
+
+        scores = torch.zeros((points.shape[0],), device=device, dtype=torch.float32)
+        chunk_size = max(int(chunk_size), 1)
+        for start in range(0, points.shape[0], chunk_size):
+            end = min(start + chunk_size, points.shape[0])
+            pts = points[start:end]
+            cam_points = pts @ R + T[None, :]
+            z = cam_points[:, 2]
+            z_safe = z.clamp_min(znear)
+            u = cam_points[:, 0] / z_safe * focal_x + width * 0.5
+            v = cam_points[:, 1] / z_safe * focal_y + height * 0.5
+            valid = (
+                (z > znear)
+                & (u >= 0.0)
+                & (u <= width - 1)
+                & (v >= 0.0)
+                & (v <= height - 1)
+            )
+            if valid.any():
+                uu = u.round().long().clamp(0, width - 1)
+                vv = v.round().long().clamp(0, height - 1)
+                chunk_scores = score_map[vv, uu]
+                scores[start:end] = torch.where(valid, chunk_scores, torch.zeros_like(chunk_scores))
+        return scores.clamp(0.0, 1.0)
+
+    def _apply_residual_boost(self, base_score, points, residual_score_map, residual_camera, line_cfg, chunk_size):
+        residual_scores = self._sample_residual_scores_for_points(
+            points,
+            residual_score_map,
+            residual_camera,
+            chunk_size=chunk_size,
+        )
+        if residual_scores is None:
+            return base_score
+        residual_boost = max(float(getattr(line_cfg, "line_residual_boost", 0.0)), 0.0)
+        if residual_boost <= 0.0:
+            return base_score
+        return base_score * (1.0 + residual_boost * residual_scores.to(device=base_score.device, dtype=base_score.dtype))
+
+    def line_guided_unpool(self, line_segments, line_confidences, line_cfg, scene_extent, residual_score_map=None, residual_camera=None):
         if line_segments is None or line_segments.numel() == 0:
             return 0
 
@@ -580,6 +643,14 @@ class GaussianModel:
         low_alpha_boost = max(float(getattr(line_cfg, "line_unpool_low_alpha_boost", 0.5)), 0.0)
 
         candidate_scores = candidate_confidences * sparse_score * (1.0 + low_alpha_boost * low_alpha_score)
+        candidate_scores = self._apply_residual_boost(
+            candidate_scores,
+            candidates,
+            residual_score_map,
+            residual_camera,
+            line_cfg,
+            chunk_size=getattr(line_cfg, "line_unpool_chunk_size", 256),
+        )
         threshold = float(getattr(line_cfg, "line_unpool_score_threshold", 0.05))
         selected = candidate_scores >= threshold
         if not selected.any():
@@ -622,7 +693,7 @@ class GaussianModel:
         )
         return int(selected_indices.shape[0])
 
-    def _line_guided_probs(self, grads, line_segments, line_cfg, line_confidences=None):
+    def _line_guided_probs(self, grads, line_segments, line_cfg, line_confidences=None, residual_score_map=None, residual_camera=None):
         xyz = self.get_xyz
         d, nearest_line_idx = point_to_segment_distance(
             xyz,
@@ -697,6 +768,14 @@ class GaussianModel:
         low_alpha_boost = max(float(getattr(line_cfg, "line_densify_low_alpha_boost", 0.0)), 0.0)
         if low_alpha_boost > 0.0:
             line_score = line_score * (1.0 + low_alpha_boost * sig_low_a)
+        line_score = self._apply_residual_boost(
+            line_score,
+            xyz,
+            residual_score_map,
+            residual_camera,
+            line_cfg,
+            chunk_size=getattr(line_cfg, "line_densify_point_chunk_size", 4096),
+        )
         p_clone = line_score * sig_g * sig_a
 
         sig_d = torch.sigmoid((d - tau_d) / s_d)
@@ -705,7 +784,7 @@ class GaussianModel:
 
         return line_score, p_clone, p_prune
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii, line_segments=None, line_confidences=None, line_cfg=None, iteration=None):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii, line_segments=None, line_confidences=None, line_cfg=None, iteration=None, residual_score_map=None, residual_camera=None):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
@@ -721,7 +800,14 @@ class GaussianModel:
                 end_iter = int(getattr(line_cfg, "line_densify_end_iter", 0))
                 in_window = iteration >= start_iter and (end_iter <= 0 or iteration <= end_iter)
             if mode != "off" and in_window:
-                line_score, p_clone, p_prune = self._line_guided_probs(grads, line_segments, line_cfg, line_confidences)
+                line_score, p_clone, p_prune = self._line_guided_probs(
+                    grads,
+                    line_segments,
+                    line_cfg,
+                    line_confidences,
+                    residual_score_map=residual_score_map,
+                    residual_camera=residual_camera,
+                )
                 if mode in ("score", "soft", "score_boost"):
                     score_boost = max(float(getattr(line_cfg, "line_densify_score_boost", 1.0)), 0.0)
                     densify_grads = grads * (1.0 + score_boost * line_score[:, None].detach())
@@ -756,6 +842,8 @@ class GaussianModel:
                     line_confidences,
                     line_cfg,
                     extent,
+                    residual_score_map=residual_score_map,
+                    residual_camera=residual_camera,
                 )
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
