@@ -392,6 +392,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     line_segments = None
     line_confidences = None
+    line_unpool_verification_cameras = None
     line_weight_func = None
     line_photo_weight_func = None
     line_image_edge_weight_func = None
@@ -547,6 +548,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 )
             )
         if line_unpool_active:
+            if opt.line_unpool_multiview_verify_enable or opt.line_unpool_color_init_enable:
+                line_unpool_verification_cameras = _select_multiview_cameras(
+                    scene.getTrainCameras(),
+                    int(opt.line_unpool_verify_max_views),
+                )
             print(
                 "[LineUnpool] interval={} max_points={} samples_per_line={} support_radius={:.5f} opacity_init={:.3f}".format(
                     int(opt.line_unpool_interval),
@@ -556,6 +562,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     float(opt.line_unpool_opacity_init),
                 )
             )
+            if line_unpool_verification_cameras is not None:
+                print(
+                    "[LineUnpool] multi-view verify={} color_init={} line_init={} views={} min_views={}".format(
+                        bool(opt.line_unpool_multiview_verify_enable),
+                        bool(opt.line_unpool_color_init_enable),
+                        bool(opt.line_unpool_line_init_enable),
+                        len(line_unpool_verification_cameras),
+                        int(opt.line_unpool_verify_min_views),
+                    )
+                )
 
     viewpoint_stack = scene.getTrainCameras().copy()
     viewpoint_indices = list(range(len(viewpoint_stack)))
@@ -1127,10 +1143,28 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         line_confidences=line_confidences if line_densify_active else None,
                         line_cfg=opt,
                         iteration=iteration,
+                        verification_cameras=line_unpool_verification_cameras,
                     )
                     line_unpool_count = getattr(gaussians, "_last_line_unpool_count", 0)
                     if line_unpool_count > 0:
                         print("\n[ITER {}] LineUnpool added {} Gaussians".format(iteration, line_unpool_count))
+                    if getattr(opt, "line_unpool_stats_enable", True):
+                        allocated_gb = torch.cuda.memory_allocated() / (1024.0 ** 3)
+                        reserved_gb = torch.cuda.memory_reserved() / (1024.0 ** 3)
+                        max_allocated_gb = torch.cuda.max_memory_allocated() / (1024.0 ** 3)
+                        print(
+                            "\n[ITER {}] GaussianStats count={} clone={} split={} unpool={} pruned={} cuda_alloc={:.2f}GB cuda_reserved={:.2f}GB cuda_max={:.2f}GB".format(
+                                iteration,
+                                int(gaussians.get_xyz.shape[0]),
+                                int(getattr(gaussians, "_last_densify_clone_count", 0)),
+                                int(getattr(gaussians, "_last_densify_split_count", 0)),
+                                int(line_unpool_count),
+                                int(getattr(gaussians, "_last_prune_count", 0)),
+                                allocated_gb,
+                                reserved_gb,
+                                max_allocated_gb,
+                            )
+                        )
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()

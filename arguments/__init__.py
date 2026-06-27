@@ -231,6 +231,15 @@ class OptimizationParams(ParamGroup):
         self.line_unpool_low_alpha_boost = 0.5
         self.line_unpool_chunk_size = 256
         self.line_unpool_point_chunk_size = 4096
+        self.line_unpool_multiview_verify_enable = False
+        self.line_unpool_verify_max_views = 16
+        self.line_unpool_verify_min_views = 2
+        self.line_unpool_color_init_enable = False
+        self.line_unpool_color_init_blend = 1.0
+        self.line_unpool_line_init_enable = False
+        self.line_unpool_line_scale_long = 1.0
+        self.line_unpool_line_scale_cross = 0.35
+        self.line_unpool_stats_enable = True
         self.densify_max_points_per_stage = 2048
         super().__init__(parser, "Optimization Parameters")
 

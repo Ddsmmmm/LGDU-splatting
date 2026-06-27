@@ -11,6 +11,7 @@
 
 import torch
 import numpy as np
+import math
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
 from torch import nn
 import os
@@ -515,7 +516,90 @@ class GaussianModel:
 
         return nearest_distances, nearest_indices
 
-    def line_guided_unpool(self, line_segments, line_confidences, line_cfg, scene_extent):
+    @torch.no_grad()
+    def _project_points_to_camera(self, points, camera):
+        device = points.device
+        dtype = points.dtype
+        height = int(camera.image_height)
+        width = int(camera.image_width)
+        R = torch.as_tensor(camera.R, device=device, dtype=dtype)
+        T = torch.as_tensor(camera.T, device=device, dtype=dtype)
+        focal_x = width / (2.0 * math.tan(float(camera.FoVx) * 0.5))
+        focal_y = height / (2.0 * math.tan(float(camera.FoVy) * 0.5))
+        znear = max(float(getattr(camera, "znear", 0.01)), 1e-4)
+
+        cam_points = points @ R + T[None, :]
+        z = cam_points[:, 2]
+        z_safe = z.clamp_min(znear)
+        u = cam_points[:, 0] / z_safe * focal_x + width * 0.5
+        v = cam_points[:, 1] / z_safe * focal_y + height * 0.5
+        valid = (
+            (z > znear)
+            & (u >= 0.0)
+            & (u <= width - 1)
+            & (v >= 0.0)
+            & (v <= height - 1)
+        )
+        return u, v, valid
+
+    @torch.no_grad()
+    def _multiview_verify_and_color(self, candidates, cameras, min_views, chunk_size=8192):
+        if cameras is None or len(cameras) == 0 or candidates.numel() == 0:
+            return None, None, None
+
+        min_views = max(int(min_views), 1)
+        chunk_size = max(int(chunk_size), 1)
+        valid_counts = torch.zeros((candidates.shape[0],), device=candidates.device, dtype=torch.float32)
+        color_sum = torch.zeros((candidates.shape[0], 3), device=candidates.device, dtype=torch.float32)
+
+        for camera in cameras:
+            image = camera.original_image.to(device=candidates.device, dtype=torch.float32).clamp(0.0, 1.0)
+            alpha_mask = None
+            if getattr(camera, "alpha_mask", None) is not None:
+                alpha_mask = camera.alpha_mask.to(device=candidates.device, dtype=torch.float32)
+            for start in range(0, candidates.shape[0], chunk_size):
+                end = min(start + chunk_size, candidates.shape[0])
+                points = candidates[start:end]
+                u, v, valid = self._project_points_to_camera(points, camera)
+                if alpha_mask is not None and valid.any():
+                    uu_alpha = u.round().long().clamp(0, int(camera.image_width) - 1)
+                    vv_alpha = v.round().long().clamp(0, int(camera.image_height) - 1)
+                    alpha_values = alpha_mask[..., vv_alpha, uu_alpha].reshape(-1)
+                    valid = valid & (alpha_values > 0.5)
+                if not valid.any():
+                    continue
+                uu = u.round().long().clamp(0, int(camera.image_width) - 1)
+                vv = v.round().long().clamp(0, int(camera.image_height) - 1)
+                sampled = image[:, vv, uu].permute(1, 0)
+                valid_f = valid.float()
+                color_sum[start:end] += sampled * valid_f[:, None]
+                valid_counts[start:end] += valid_f
+
+        valid_mask = valid_counts >= float(min_views)
+        colors = color_sum / valid_counts[:, None].clamp_min(1.0)
+        return valid_mask, valid_counts, colors.clamp(0.0, 1.0)
+
+    @torch.no_grad()
+    def _rotation_from_directions(self, directions):
+        directions = torch.nn.functional.normalize(directions, dim=-1, eps=1e-8)
+        fallback = torch.tensor([0.0, 0.0, 1.0], device=directions.device, dtype=directions.dtype).expand_as(directions)
+        alt = torch.tensor([0.0, 1.0, 0.0], device=directions.device, dtype=directions.dtype).expand_as(directions)
+        parallel = torch.abs((directions * fallback).sum(dim=-1)) > 0.95
+        up = torch.where(parallel[:, None], alt, fallback)
+        y_axis = torch.nn.functional.normalize(torch.cross(up, directions, dim=-1), dim=-1, eps=1e-8)
+        z_axis = torch.nn.functional.normalize(torch.cross(directions, y_axis, dim=-1), dim=-1, eps=1e-8)
+        R = torch.stack((directions, y_axis, z_axis), dim=-1)
+
+        trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]
+        qw = torch.sqrt(torch.clamp(trace + 1.0, min=1e-8)) * 0.5
+        denom = (4.0 * qw).clamp_min(1e-8)
+        qx = (R[:, 2, 1] - R[:, 1, 2]) / denom
+        qy = (R[:, 0, 2] - R[:, 2, 0]) / denom
+        qz = (R[:, 1, 0] - R[:, 0, 1]) / denom
+        q = torch.stack((qw, qx, qy, qz), dim=-1)
+        return torch.nn.functional.normalize(q, dim=-1, eps=1e-8)
+
+    def line_guided_unpool(self, line_segments, line_confidences, line_cfg, scene_extent, verification_cameras=None):
         if line_segments is None or line_segments.numel() == 0:
             return 0
 
@@ -552,13 +636,40 @@ class GaussianModel:
         line_ends = valid_segments[:, 1, :]
         candidates = line_starts[:, None, :] * (1.0 - t[None, :, None]) + line_ends[:, None, :] * t[None, :, None]
         candidates = candidates.reshape(-1, 3)
+        candidate_directions = torch.nn.functional.normalize(
+            (line_ends - line_starts)[:, None, :].repeat(1, samples_per_line, 1).reshape(-1, 3),
+            dim=-1,
+            eps=1e-8,
+        )
         candidate_confidences = valid_confidences[:, None].repeat(1, samples_per_line).reshape(-1)
 
         candidate_limit = max_points * max(int(getattr(line_cfg, "line_unpool_candidate_factor", 4)), 1)
         if candidate_confidences.numel() > candidate_limit:
             keep = torch.topk(candidate_confidences, k=candidate_limit, largest=True).indices
             candidates = candidates[keep]
+            candidate_directions = candidate_directions[keep]
             candidate_confidences = candidate_confidences[keep]
+
+        mv_colors = None
+        mv_color_valid = None
+        if getattr(line_cfg, "line_unpool_multiview_verify_enable", False) or getattr(line_cfg, "line_unpool_color_init_enable", False):
+            valid_mask, valid_counts, colors = self._multiview_verify_and_color(
+                candidates,
+                verification_cameras,
+                min_views=getattr(line_cfg, "line_unpool_verify_min_views", 2),
+                chunk_size=getattr(line_cfg, "line_unpool_chunk_size", 256),
+            )
+            if valid_mask is not None:
+                if getattr(line_cfg, "line_unpool_multiview_verify_enable", False):
+                    candidates = candidates[valid_mask]
+                    candidate_directions = candidate_directions[valid_mask]
+                    candidate_confidences = candidate_confidences[valid_mask]
+                    colors = colors[valid_mask]
+                    if candidates.numel() == 0:
+                        return 0
+                    valid_mask = torch.ones((candidates.shape[0],), device=candidates.device, dtype=torch.bool)
+                mv_colors = colors
+                mv_color_valid = valid_mask
 
         nearest_distances, nearest_indices = self._nearest_gaussian_for_points(
             candidates,
@@ -593,8 +704,16 @@ class GaussianModel:
 
         nearest_indices = nearest_indices[selected_indices]
         new_xyz = candidates[selected_indices]
+        selected_directions = candidate_directions[selected_indices]
         new_features_dc = self._features_dc[nearest_indices]
         new_features_rest = self._features_rest[nearest_indices]
+        if mv_colors is not None and getattr(line_cfg, "line_unpool_color_init_enable", False):
+            color_blend = min(max(float(getattr(line_cfg, "line_unpool_color_init_blend", 1.0)), 0.0), 1.0)
+            selected_color_valid = mv_color_valid[selected_indices] if mv_color_valid is not None else torch.ones((selected_indices.shape[0],), device=new_features_dc.device, dtype=torch.bool)
+            if selected_color_valid.any():
+                sampled_dc = RGB2SH(mv_colors[selected_indices].to(device=new_features_dc.device, dtype=new_features_dc.dtype)).unsqueeze(1)
+                blended_dc = (1.0 - color_blend) * new_features_dc + color_blend * sampled_dc
+                new_features_dc = torch.where(selected_color_valid[:, None, None], blended_dc, new_features_dc)
 
         opacity_init = min(max(float(getattr(line_cfg, "line_unpool_opacity_init", 0.05)), 1e-4), 0.99)
         new_opacities = self.inverse_opacity_activation(
@@ -607,8 +726,14 @@ class GaussianModel:
             new_scaling_activated,
             support_radius * torch.ones_like(new_scaling_activated),
         ).clamp_min(1e-5)
-        new_scaling = self.scaling_inverse_activation(new_scaling_activated)
         new_rotation = self._rotation[nearest_indices]
+        if getattr(line_cfg, "line_unpool_line_init_enable", False):
+            base_scale = new_scaling_activated.max(dim=1, keepdim=True).values.clamp_min(1e-5)
+            long_scale = base_scale * max(float(getattr(line_cfg, "line_unpool_line_scale_long", 1.0)), 1e-3)
+            cross_scale = base_scale * max(float(getattr(line_cfg, "line_unpool_line_scale_cross", 0.35)), 1e-3)
+            new_scaling_activated = torch.cat((long_scale, cross_scale, cross_scale), dim=1).clamp_min(1e-5)
+            new_rotation = self._rotation_from_directions(selected_directions).to(dtype=self._rotation.dtype)
+        new_scaling = self.scaling_inverse_activation(new_scaling_activated)
         new_tmp_radii = torch.zeros((selected_indices.shape[0],), device="cuda")
 
         self.densification_postfix(
@@ -705,7 +830,7 @@ class GaussianModel:
 
         return line_score, p_clone, p_prune
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii, line_segments=None, line_confidences=None, line_cfg=None, iteration=None):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii, line_segments=None, line_confidences=None, line_cfg=None, iteration=None, verification_cameras=None):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
@@ -713,6 +838,9 @@ class GaussianModel:
         line_prune_mask = None
         densify_grads = grads
         self._last_line_unpool_count = 0
+        self._last_densify_clone_count = 0
+        self._last_densify_split_count = 0
+        self._last_prune_count = 0
         if line_segments is not None and line_cfg is not None and line_cfg.line_densify_enable:
             mode = str(getattr(line_cfg, "line_densify_mode", "off")).lower()
             in_window = True
@@ -735,8 +863,14 @@ class GaussianModel:
                             line_prune_mask = p_prune >= line_cfg.line_densify_prune_prob_thresh
 
         self.tmp_radii = radii
+        before_clone = self.get_xyz.shape[0]
         self.densify_and_clone(densify_grads, max_grad, extent)
+        after_clone = self.get_xyz.shape[0]
+        self._last_densify_clone_count = max(int(after_clone - before_clone), 0)
+        before_split = self.get_xyz.shape[0]
         self.densify_and_split(densify_grads, max_grad, extent)
+        after_split = self.get_xyz.shape[0]
+        self._last_densify_split_count = max(int(after_split - before_split), 0)
         self._line_clone_mask = None
 
         if line_segments is not None and line_cfg is not None and getattr(line_cfg, "line_unpool_enable", False):
@@ -756,6 +890,7 @@ class GaussianModel:
                     line_confidences,
                     line_cfg,
                     extent,
+                    verification_cameras=verification_cameras,
                 )
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
@@ -765,6 +900,7 @@ class GaussianModel:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+        self._last_prune_count = int(prune_mask.sum().item())
         self.prune_points(prune_mask)
         tmp_radii = self.tmp_radii
         self.tmp_radii = None
