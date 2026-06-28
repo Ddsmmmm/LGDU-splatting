@@ -201,6 +201,11 @@ class OptimizationParams(ParamGroup):
         self.line_densify_confidence_power = 1.0
         self.line_densify_confidence_max = 3.0
         self.line_densify_low_alpha_boost = 0.5
+        self.line_densify_residual_enable = False
+        self.line_densify_residual_weight = 0.5
+        self.line_densify_residual_quantile = 0.75
+        self.line_densify_residual_temperature = 0.0
+        self.line_densify_residual_suppress = 0.0
         self.line_densify_prune_enable = False
         self.line_densify_sigma = 0.0
         self.line_densify_tau_g = 0.0
@@ -239,6 +244,13 @@ class OptimizationParams(ParamGroup):
         self.line_unpool_line_init_enable = False
         self.line_unpool_line_scale_long = 1.0
         self.line_unpool_line_scale_cross = 0.35
+        self.line_unpool_residual_enable = False
+        self.line_unpool_residual_weight = 1.0
+        self.line_unpool_residual_quantile = 0.75
+        self.line_unpool_residual_temperature = 0.0
+        self.line_unpool_residual_suppress = 0.0
+        self.line_unpool_residual_visible_required = False
+        self.line_unpool_residual_min_score = 0.0
         self.line_unpool_stats_enable = True
         self.densify_max_points_per_stage = 2048
         super().__init__(parser, "Optimization Parameters")

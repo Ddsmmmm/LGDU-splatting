@@ -539,12 +539,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             opt.line_densify_prune_start_iter = int(0.6 * opt.iterations)
         if line_densify_active:
             print(
-                "[LineDensify] mode={} score_boost={:.3f} sigma={:.5f} confidence_power={:.3f} low_alpha_boost={:.3f}".format(
+                "[LineDensify] mode={} score_boost={:.3f} sigma={:.5f} confidence_power={:.3f} low_alpha_boost={:.3f} residual={}".format(
                     line_densify_mode,
                     float(opt.line_densify_score_boost),
                     float(opt.line_densify_sigma),
                     float(opt.line_densify_confidence_power),
                     float(opt.line_densify_low_alpha_boost),
+                    bool(opt.line_densify_residual_enable),
                 )
             )
         if line_unpool_active:
@@ -570,6 +571,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         bool(opt.line_unpool_line_init_enable),
                         len(line_unpool_verification_cameras),
                         int(opt.line_unpool_verify_min_views),
+                    )
+                )
+            if opt.line_unpool_residual_enable or opt.line_densify_residual_enable:
+                print(
+                    "[ResidualAwareV2] densify_residual={} unpool_residual={} q={:.2f}/{:.2f} weight={:.3f}/{:.3f}".format(
+                        bool(opt.line_densify_residual_enable),
+                        bool(opt.line_unpool_residual_enable),
+                        float(opt.line_densify_residual_quantile),
+                        float(opt.line_unpool_residual_quantile),
+                        float(opt.line_densify_residual_weight),
+                        float(opt.line_unpool_residual_weight),
                     )
                 )
 
@@ -1127,6 +1139,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Densification
             if iteration < opt.densify_until_iter:
+                residual_map_for_densify = None
+                residual_camera_for_densify = None
+                if line_densify_active and (opt.line_densify_residual_enable or opt.line_unpool_residual_enable):
+                    with torch.no_grad():
+                        residual_map_for_densify = torch.abs(image.detach() - gt_image.detach()).mean(dim=0)
+                        if viewpoint_cam.alpha_mask is not None:
+                            residual_map_for_densify = residual_map_for_densify * viewpoint_cam.alpha_mask.cuda().squeeze().detach().float()
+                    residual_camera_for_densify = viewpoint_cam
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
@@ -1144,6 +1164,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         line_cfg=opt,
                         iteration=iteration,
                         verification_cameras=line_unpool_verification_cameras,
+                        residual_camera=residual_camera_for_densify,
+                        residual_map=residual_map_for_densify,
                     )
                     line_unpool_count = getattr(gaussians, "_last_line_unpool_count", 0)
                     if line_unpool_count > 0:
@@ -1153,13 +1175,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         reserved_gb = torch.cuda.memory_reserved() / (1024.0 ** 3)
                         max_allocated_gb = torch.cuda.max_memory_allocated() / (1024.0 ** 3)
                         print(
-                            "\n[ITER {}] GaussianStats count={} clone={} split={} unpool={} pruned={} cuda_alloc={:.2f}GB cuda_reserved={:.2f}GB cuda_max={:.2f}GB".format(
+                            "\n[ITER {}] GaussianStats count={} clone={} split={} unpool={} pruned={} densify_res={:.3f}/{:.3f} unpool_res={:.3f}/{:.3f} cuda_alloc={:.2f}GB cuda_reserved={:.2f}GB cuda_max={:.2f}GB".format(
                                 iteration,
                                 int(gaussians.get_xyz.shape[0]),
                                 int(getattr(gaussians, "_last_densify_clone_count", 0)),
                                 int(getattr(gaussians, "_last_densify_split_count", 0)),
                                 int(line_unpool_count),
                                 int(getattr(gaussians, "_last_prune_count", 0)),
+                                float(getattr(gaussians, "_last_line_densify_residual_mean", 0.0)),
+                                float(getattr(gaussians, "_last_line_densify_residual_valid_ratio", 0.0)),
+                                float(getattr(gaussians, "_last_line_unpool_residual_mean", 0.0)),
+                                float(getattr(gaussians, "_last_line_unpool_residual_valid_ratio", 0.0)),
                                 allocated_gb,
                                 reserved_gb,
                                 max_allocated_gb,

@@ -580,6 +580,48 @@ class GaussianModel:
         return valid_mask, valid_counts, colors.clamp(0.0, 1.0)
 
     @torch.no_grad()
+    def _residual_scores_for_points(self, points, camera, residual_map, quantile=0.75, temperature=0.0, chunk_size=8192):
+        if camera is None or residual_map is None or points is None or points.numel() == 0:
+            return None, None
+
+        if residual_map.dim() == 3:
+            residual_map = residual_map.mean(dim=0)
+        residual_map = residual_map.to(device=points.device, dtype=torch.float32).detach().clamp_min(0.0)
+        if residual_map.numel() == 0:
+            return None, None
+
+        chunk_size = max(int(chunk_size), 1)
+        scores = torch.zeros((points.shape[0],), device=points.device, dtype=torch.float32)
+        valid_all = torch.zeros((points.shape[0],), device=points.device, dtype=torch.bool)
+
+        valid_values = residual_map[residual_map > 0.0]
+        if valid_values.numel() == 0:
+            threshold = residual_map.mean()
+        else:
+            q = min(max(float(quantile), 0.0), 1.0)
+            threshold = torch.quantile(valid_values, q)
+        if float(temperature) <= 0.0:
+            temperature_value = max(float(threshold.detach().item()) * 0.35, 1e-4)
+        else:
+            temperature_value = max(float(temperature), 1e-6)
+        temp = torch.tensor(temperature_value, device=points.device, dtype=torch.float32)
+
+        for start in range(0, points.shape[0], chunk_size):
+            end = min(start + chunk_size, points.shape[0])
+            u, v, valid = self._project_points_to_camera(points[start:end], camera)
+            if not valid.any():
+                continue
+            uu = u.round().long().clamp(0, int(camera.image_width) - 1)
+            vv = v.round().long().clamp(0, int(camera.image_height) - 1)
+            sampled = residual_map[vv, uu]
+            local_score = torch.sigmoid((sampled - threshold) / temp)
+            local_score = torch.where(valid, local_score, torch.zeros_like(local_score))
+            scores[start:end] = local_score
+            valid_all[start:end] = valid
+
+        return scores, valid_all
+
+    @torch.no_grad()
     def _rotation_from_directions(self, directions):
         directions = torch.nn.functional.normalize(directions, dim=-1, eps=1e-8)
         fallback = torch.tensor([0.0, 0.0, 1.0], device=directions.device, dtype=directions.dtype).expand_as(directions)
@@ -599,7 +641,7 @@ class GaussianModel:
         q = torch.stack((qw, qx, qy, qz), dim=-1)
         return torch.nn.functional.normalize(q, dim=-1, eps=1e-8)
 
-    def line_guided_unpool(self, line_segments, line_confidences, line_cfg, scene_extent, verification_cameras=None):
+    def line_guided_unpool(self, line_segments, line_confidences, line_cfg, scene_extent, verification_cameras=None, residual_camera=None, residual_map=None):
         if line_segments is None or line_segments.numel() == 0:
             return 0
 
@@ -691,8 +733,34 @@ class GaussianModel:
         low_alpha_boost = max(float(getattr(line_cfg, "line_unpool_low_alpha_boost", 0.5)), 0.0)
 
         candidate_scores = candidate_confidences * sparse_score * (1.0 + low_alpha_boost * low_alpha_score)
+        residual_scores = None
+        residual_valid = None
+        if getattr(line_cfg, "line_unpool_residual_enable", False):
+            residual_scores, residual_valid = self._residual_scores_for_points(
+                candidates,
+                residual_camera,
+                residual_map,
+                quantile=getattr(line_cfg, "line_unpool_residual_quantile", 0.75),
+                temperature=getattr(line_cfg, "line_unpool_residual_temperature", 0.0),
+                chunk_size=getattr(line_cfg, "line_unpool_chunk_size", 256),
+            )
+            if residual_scores is not None:
+                residual_weight = max(float(getattr(line_cfg, "line_unpool_residual_weight", 1.0)), 0.0)
+                residual_suppress = min(max(float(getattr(line_cfg, "line_unpool_residual_suppress", 0.0)), 0.0), 1.0)
+                residual_boost = 1.0 + residual_weight * residual_scores
+                if residual_suppress > 0.0:
+                    residual_boost = residual_boost * (1.0 - residual_suppress * (1.0 - residual_scores))
+                residual_boost = torch.where(residual_valid, residual_boost, torch.ones_like(residual_boost))
+                candidate_scores = candidate_scores * residual_boost
+                if getattr(line_cfg, "line_unpool_residual_visible_required", False):
+                    candidate_scores = torch.where(residual_valid, candidate_scores, torch.zeros_like(candidate_scores))
+
         threshold = float(getattr(line_cfg, "line_unpool_score_threshold", 0.05))
         selected = candidate_scores >= threshold
+        if residual_scores is not None and float(getattr(line_cfg, "line_unpool_residual_min_score", 0.0)) > 0.0:
+            min_residual_score = float(getattr(line_cfg, "line_unpool_residual_min_score", 0.0))
+            residual_keep = torch.logical_or(~residual_valid, residual_scores >= min_residual_score)
+            selected = torch.logical_and(selected, residual_keep)
         if not selected.any():
             return 0
 
@@ -736,6 +804,16 @@ class GaussianModel:
         new_scaling = self.scaling_inverse_activation(new_scaling_activated)
         new_tmp_radii = torch.zeros((selected_indices.shape[0],), device="cuda")
 
+        if residual_scores is not None:
+            selected_residual_scores = residual_scores[selected_indices]
+            selected_residual_valid = residual_valid[selected_indices]
+            if selected_residual_valid.any():
+                self._last_line_unpool_residual_mean = float(selected_residual_scores[selected_residual_valid].mean().item())
+                self._last_line_unpool_residual_valid_ratio = float(selected_residual_valid.float().mean().item())
+            else:
+                self._last_line_unpool_residual_mean = 0.0
+                self._last_line_unpool_residual_valid_ratio = 0.0
+
         self.densification_postfix(
             new_xyz,
             new_features_dc,
@@ -747,7 +825,7 @@ class GaussianModel:
         )
         return int(selected_indices.shape[0])
 
-    def _line_guided_probs(self, grads, line_segments, line_cfg, line_confidences=None):
+    def _line_guided_probs(self, grads, line_segments, line_cfg, line_confidences=None, residual_camera=None, residual_map=None):
         xyz = self.get_xyz
         d, nearest_line_idx = point_to_segment_distance(
             xyz,
@@ -822,6 +900,26 @@ class GaussianModel:
         low_alpha_boost = max(float(getattr(line_cfg, "line_densify_low_alpha_boost", 0.0)), 0.0)
         if low_alpha_boost > 0.0:
             line_score = line_score * (1.0 + low_alpha_boost * sig_low_a)
+        if getattr(line_cfg, "line_densify_residual_enable", False):
+            residual_scores, residual_valid = self._residual_scores_for_points(
+                xyz,
+                residual_camera,
+                residual_map,
+                quantile=getattr(line_cfg, "line_densify_residual_quantile", 0.75),
+                temperature=getattr(line_cfg, "line_densify_residual_temperature", 0.0),
+                chunk_size=getattr(line_cfg, "line_densify_point_chunk_size", 4096),
+            )
+            if residual_scores is not None:
+                residual_weight = max(float(getattr(line_cfg, "line_densify_residual_weight", 0.5)), 0.0)
+                residual_suppress = min(max(float(getattr(line_cfg, "line_densify_residual_suppress", 0.0)), 0.0), 1.0)
+                residual_boost = 1.0 + residual_weight * residual_scores
+                if residual_suppress > 0.0:
+                    residual_boost = residual_boost * (1.0 - residual_suppress * (1.0 - residual_scores))
+                residual_boost = torch.where(residual_valid, residual_boost, torch.ones_like(residual_boost))
+                line_score = line_score * residual_boost
+                if residual_valid.any():
+                    self._last_line_densify_residual_mean = float(residual_scores[residual_valid].mean().item())
+                    self._last_line_densify_residual_valid_ratio = float(residual_valid.float().mean().item())
         p_clone = line_score * sig_g * sig_a
 
         sig_d = torch.sigmoid((d - tau_d) / s_d)
@@ -830,7 +928,7 @@ class GaussianModel:
 
         return line_score, p_clone, p_prune
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii, line_segments=None, line_confidences=None, line_cfg=None, iteration=None, verification_cameras=None):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii, line_segments=None, line_confidences=None, line_cfg=None, iteration=None, verification_cameras=None, residual_camera=None, residual_map=None):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
@@ -841,6 +939,10 @@ class GaussianModel:
         self._last_densify_clone_count = 0
         self._last_densify_split_count = 0
         self._last_prune_count = 0
+        self._last_line_densify_residual_mean = 0.0
+        self._last_line_densify_residual_valid_ratio = 0.0
+        self._last_line_unpool_residual_mean = 0.0
+        self._last_line_unpool_residual_valid_ratio = 0.0
         if line_segments is not None and line_cfg is not None and line_cfg.line_densify_enable:
             mode = str(getattr(line_cfg, "line_densify_mode", "off")).lower()
             in_window = True
@@ -849,7 +951,14 @@ class GaussianModel:
                 end_iter = int(getattr(line_cfg, "line_densify_end_iter", 0))
                 in_window = iteration >= start_iter and (end_iter <= 0 or iteration <= end_iter)
             if mode != "off" and in_window:
-                line_score, p_clone, p_prune = self._line_guided_probs(grads, line_segments, line_cfg, line_confidences)
+                line_score, p_clone, p_prune = self._line_guided_probs(
+                    grads,
+                    line_segments,
+                    line_cfg,
+                    line_confidences,
+                    residual_camera=residual_camera,
+                    residual_map=residual_map,
+                )
                 if mode in ("score", "soft", "score_boost"):
                     score_boost = max(float(getattr(line_cfg, "line_densify_score_boost", 1.0)), 0.0)
                     densify_grads = grads * (1.0 + score_boost * line_score[:, None].detach())
@@ -891,6 +1000,8 @@ class GaussianModel:
                     line_cfg,
                     extent,
                     verification_cameras=verification_cameras,
+                    residual_camera=residual_camera,
+                    residual_map=residual_map,
                 )
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
